@@ -43,6 +43,25 @@ pub fn file_name_for(url: &str, file_name: Option<&str>) -> Result<String> {
     Ok(name)
 }
 
+/// Download a text file over HTTPS, refusing anything larger than `max_bytes`.
+pub fn download_text(url: &str, max_bytes: u64) -> Result<String> {
+    if !url.starts_with("https://") {
+        bail!("refusing to download over plain HTTP: {url}");
+    }
+    let response = ureq::get(url).call().with_context(|| format!("downloading {url}"))?;
+    let mut text = String::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(max_bytes + 1)
+        .read_to_string(&mut text)
+        .with_context(|| format!("reading {url}"))?;
+    if text.len() as u64 > max_bytes {
+        bail!("{url} is larger than {max_bytes} bytes");
+    }
+    Ok(text)
+}
+
 /// Download `url` into `dir/name` and check it against `sha256`. A cached copy
 /// with the right hash is reused; a wrong hash deletes the file.
 pub fn download_verified(url: &str, sha256: &str, dir: &Path, name: &str) -> Result<PathBuf> {

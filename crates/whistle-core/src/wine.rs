@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(result.prefix, Path::new("/w/data/prefixes/org.notepad-plus-plus.NotepadPlusPlus"));
         let cmds = runner.commands();
         assert!(cmds[0].starts_with("WINEPREFIX=/w/data/prefixes/") && cmds[0].ends_with("wineboot --init"));
-        assert!(cmds[1].ends_with("npp.8.7.1.Installer.x64.exe /S"), "{cmds:?}");
+        assert!(cmds[1].ends_with("npp.8.9.9.Installer.x64.exe /S"), "{cmds:?}");
         assert_eq!(result.desktop_files, [Path::new("/w/applications/whistle-org.notepad-plus-plus.NotepadPlusPlus-notepad.desktop")]);
     }
 

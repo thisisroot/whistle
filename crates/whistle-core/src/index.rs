@@ -12,6 +12,12 @@ use crate::recipe::Runtime;
 
 pub const FORMAT: u32 = 1;
 
+/// Where whistle-server publishes the index; `$WHISTLE_INDEX_URL` overrides it.
+pub const DEFAULT_URL: &str = "https://github.com/thisisroot/whistle-server/releases/download/index/index.json";
+
+/// Largest index `update` accepts.
+const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Small hand-written catalog used until a real index has been fetched.
 const DEV_INDEX: &str = include_str!("../../../catalog/dev-index.json");
 
@@ -31,6 +37,13 @@ pub struct App {
     pub summary: String,
     #[serde(default)]
     pub categories: Vec<String>,
+    #[serde(default)]
+    pub icon_url: String,
+    #[serde(default)]
+    pub homepage: String,
+    /// SPDX expression, or `LicenseRef-proprietary`.
+    #[serde(default)]
+    pub license: String,
     #[serde(default)]
     pub sources: Vec<Source>,
     #[serde(default)]
@@ -174,6 +187,25 @@ impl Index {
         Ok((Self::builtin(), IndexOrigin::Builtin))
     }
 
+    /// Fetch an index from a URL or local path, check it parses, and make it
+    /// the cached index. Returns the new index.
+    pub fn update(from: &str, paths: &Paths) -> Result<Self> {
+        let text = if from.starts_with("https://") {
+            crate::fetch::download_text(from, MAX_INDEX_BYTES)?
+        } else if from.contains("://") {
+            bail!("refusing to fetch the index over anything but HTTPS: {from}");
+        } else {
+            std::fs::read_to_string(from).with_context(|| format!("reading {from}"))?
+        };
+        let index = Self::parse(&text).with_context(|| format!("loading index from {from}"))?;
+        let dest = paths.index_cache();
+        std::fs::create_dir_all(&paths.cache)?;
+        let tmp = dest.with_extension("json.tmp");
+        std::fs::write(&tmp, &text)?;
+        std::fs::rename(&tmp, &dest).with_context(|| format!("writing {}", dest.display()))?;
+        Ok(index)
+    }
+
     pub fn builtin() -> Self {
         Self::parse(DEV_INDEX).expect("the built-in dev index is valid")
     }
@@ -268,6 +300,27 @@ mod tests {
         let hits = index.search("fire");
         assert_eq!(hits[0].id, "org.mozilla.firefox");
         assert!(index.search("office").iter().any(|a| a.id == "com.microsoft.Office"));
+    }
+
+    #[test]
+    fn update_from_file_replaces_the_cache() {
+        let root = std::env::temp_dir().join(format!("whistle-index-{}", std::process::id()));
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("new.json");
+        std::fs::write(&src, r#"{"format": 1, "apps": [{"id": "org.example.A", "name": "A", "license": "MIT"}]}"#).unwrap();
+
+        let index = Index::update(src.to_str().unwrap(), &paths).unwrap();
+        assert_eq!(index.apps[0].license, "MIT");
+        let (loaded, origin) = Index::load(None, &paths).unwrap();
+        assert_eq!(loaded.apps.len(), 1);
+        assert!(matches!(origin, IndexOrigin::File(p) if p == paths.index_cache()));
+
+        std::fs::write(&src, "not json").unwrap();
+        assert!(Index::update(src.to_str().unwrap(), &paths).is_err());
+        assert_eq!(Index::load(None, &paths).unwrap().0.apps.len(), 1, "a bad index must not replace a good one");
+        assert!(Index::update("http://example.org/index.json", &paths).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

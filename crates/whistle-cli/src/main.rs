@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use whistle_core::host::{Host, Tool};
-use whistle_core::index::{App, Index, IndexOrigin};
+use whistle_core::index::{self, App, Index, IndexOrigin};
 use whistle_core::install::{self, Ctx, Options};
 use whistle_core::paths::Paths;
 use whistle_core::resolve::{Prefs, Via, best, resolve};
@@ -66,6 +66,12 @@ enum Command {
     },
     /// List apps Whistle installed.
     List,
+    /// Download the latest catalog.
+    Update {
+        /// URL or file to load the index from instead of the default.
+        #[arg(long, value_name = "URL|PATH")]
+        from: Option<String>,
+    },
     /// Show what Whistle knows about this machine.
     Doctor,
 }
@@ -126,6 +132,15 @@ fn run(cli: Cli) -> Result<()> {
             for i in &state.installed {
                 println!("{:<24} {:<40} {}", i.app_name, i.app_id, i.how.describe());
             }
+            Ok(())
+        }
+        Command::Update { from } => {
+            let from = from
+                .or_else(|| std::env::var("WHISTLE_INDEX_URL").ok())
+                .unwrap_or_else(|| index::DEFAULT_URL.to_owned());
+            println!("Fetching {from}");
+            let index = Index::update(&from, &paths)?;
+            println!("Catalog updated: {} apps.", index.apps.len());
             Ok(())
         }
         Command::Doctor => doctor(&host, &paths, load()),
@@ -226,7 +241,15 @@ fn doctor(host: &Host, paths: &Paths, index: Result<(Index, IndexOrigin)>) -> Re
     println!("Tools:      {}", names(&found));
     println!("Missing:    {}", names(&missing));
     match index {
-        Ok((index, origin)) => println!("Catalog:    {} apps from {origin}", index.apps.len()),
+        Ok((index, origin)) => {
+            println!("Catalog:    {} apps from {origin}", index.apps.len());
+            if !index.generated_at.is_empty() && index.generated_at != "dev" {
+                println!("            generated {}", index.generated_at);
+            }
+            if matches!(origin, IndexOrigin::Builtin) {
+                println!("            run `whistle update` to get the full catalog");
+            }
+        }
         Err(e) => println!("Catalog:    failed to load: {e:#}"),
     }
     println!("Data:       {}", paths.data.display());

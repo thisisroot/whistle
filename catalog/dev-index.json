@@ -275,7 +275,7 @@
             "schema_version": 1,
             "id": "org.notepad-plus-plus.NotepadPlusPlus",
             "app": "org.notepad-plus-plus.NotepadPlusPlus",
-            "version_range": "8.7",
+            "version_range": "8.9",
             "runtime": "wine",
             "requires": {
               "wine": ">=8.0",
@@ -283,8 +283,8 @@
             },
             "installer": {
               "type": "download",
-              "url": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.7.1/npp.8.7.1.Installer.x64.exe",
-              "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+              "url": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.9/npp.8.9.9.Installer.x64.exe",
+              "sha256": "a18cfb33d616c8eecda0059604d40bdb9d607fbc4ede857c8be6e41986464367"
             },
             "steps": [
               {
