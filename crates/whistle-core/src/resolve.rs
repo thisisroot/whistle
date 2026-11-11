@@ -95,8 +95,20 @@ impl fmt::Display for Candidate<'_> {
 /// left out; options that fit but can't run yet carry a blocker.
 pub fn resolve<'a>(app: &'a App, host: &Host, prefs: &Prefs) -> Vec<Candidate<'a>> {
     let mut out: Vec<Candidate<'a>> = Vec::new();
+    let exact = format!("linux:{}", host.distro);
+    // When a package manager has a name for this exact distro, its names for the
+    // parent distro (Debian's on Ubuntu, say) may not exist here; leave them out.
+    let exact_kinds: Vec<SourceKind> = app
+        .sources
+        .iter()
+        .filter(|s| s.kind.is_native() && s.platforms.contains(&exact))
+        .map(|s| s.kind)
+        .collect();
+    let relevant = |s: &&Source| {
+        host.matches_platforms(&s.platforms) && (!exact_kinds.contains(&s.kind) || s.platforms.contains(&exact))
+    };
 
-    for source in app.sources.iter().filter(|s| host.matches_platforms(&s.platforms)) {
+    for source in app.sources.iter().filter(relevant) {
         let tier = match source.kind {
             k if k.is_native() => 0,
             SourceKind::Flatpak => 1,
@@ -106,8 +118,10 @@ pub fn resolve<'a>(app: &'a App, host: &Host, prefs: &Prefs) -> Vec<Candidate<'a
             SourceKind::Wsl => 7,
             _ => unreachable!(),
         };
+        // A package listed for this exact distro beats one listed for its parent.
+        let fallback = u8::from(source.kind.is_native() && !source.platforms.contains(&exact));
         let blocker = source_blocker(source, host);
-        out.push(Candidate { target: Target::Source(source), blocker, rank: (tier, 0) });
+        out.push(Candidate { target: Target::Source(source), blocker, rank: (tier, fallback) });
     }
 
     for entry in app.recipes.iter().filter(|r| r.status != RecipeStatus::Retired) {
@@ -249,6 +263,22 @@ mod tests {
         assert_eq!(methods(&resolve(app, &h, &prefs)), ["flatpak"]);
         let prefs = Prefs { via: Some(Via::Native), ..Prefs::default() };
         assert_eq!(methods(&resolve(app, &h, &prefs)), ["apt"]);
+    }
+
+    #[test]
+    fn exact_distro_package_beats_parent_distro() {
+        let index = Index::parse(r#"{"format": 1, "apps": [{"id": "org.example.A", "name": "A", "sources": [
+            {"kind": "apt", "ref": "a-debian", "platforms": ["linux:debian"]},
+            {"kind": "apt", "ref": "a-ubuntu", "platforms": ["linux:ubuntu"]}
+        ]}]}"#)
+        .unwrap();
+        let app = &index.apps[0];
+        let ubuntu = host("ID=ubuntu\nID_LIKE=debian\n", &[Tool::AptGet, Tool::Sudo]);
+        let cands = resolve(app, &ubuntu, &Prefs::default());
+        assert_eq!(cands.len(), 1, "Debian's name is dropped on Ubuntu");
+        assert_eq!(cands[0].to_string(), "apt: a-ubuntu");
+        let debian = host("ID=debian\n", &[Tool::AptGet, Tool::Sudo]);
+        assert_eq!(best(&resolve(app, &debian, &Prefs::default())).unwrap().to_string(), "apt: a-debian");
     }
 
     #[test]

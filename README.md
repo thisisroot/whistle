@@ -17,7 +17,8 @@ Early, but the CLI works:
 - Native packages (pacman, apt, dnf, zypper), Flatpak (per-user) and winget.
 - Windows apps on Linux through Wine recipes, with menu entries for each app.
 - About 1000 apps in the catalog: the most popular Flathub apps plus
-  hand-maintained entries.
+  hand-maintained entries. Around a quarter of them install as your distro's
+  own package, matched through the distros' AppStream data.
 
 Proton, WSL and VM recipes are listed but not supported yet. The desktop app
 comes after the CLI.
@@ -76,7 +77,9 @@ Before the first update, Whistle uses a small built-in catalog
 - `crates/whistle-cli`: the `whistle` command.
 - `catalog/dev-index.json`: the built-in catalog.
 
-Run the tests with `cargo test`.
+Run the tests with `cargo test`. `tests/distros/run.sh <index.json>` checks the
+catalog against real Arch, Debian, Ubuntu, Fedora and openSUSE containers: every
+listed package must exist, and one app is installed and removed for real.
 
 Related repos:
 

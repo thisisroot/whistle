@@ -77,6 +77,12 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Rust ignores SIGPIPE, so `whistle search x | head` would panic on the
+    // closed pipe. Like other command-line tools, just stop instead.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
