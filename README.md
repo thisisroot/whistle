@@ -53,7 +53,9 @@ refs, winget ids) and any recipes for running it on the other OS.
 `whistle install` checks which of those fit this machine and picks the best one.
 Every command runs as a plain argument list, never through a shell. A Wine
 recipe gets its own prefix in `~/.local/share/whistle/prefixes/<recipe>` and a
-menu entry per launcher. Installed apps are recorded in
+menu entry per launcher. Once the install has finished, the prefix's copies of
+Wine's own DLLs are replaced with links to the read-only originals, which keeps
+each prefix around 150 MB instead of 1.3 GB. Installed apps are recorded in
 `~/.local/share/whistle/installed.json`.
 
 Environment variables:

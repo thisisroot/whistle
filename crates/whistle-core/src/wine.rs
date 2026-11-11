@@ -2,6 +2,8 @@
 //! then menu entries for each launcher.
 
 use std::fmt::Write as _;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -101,6 +103,20 @@ pub fn install(recipe: &Recipe, paths: &Paths, runner: &dyn Runner, user_file: O
         }
     }
 
+    // Let the installer's background processes finish before touching the prefix.
+    if let Some(server) = wineserver() {
+        let _ = runner.run(&Cmd::new(server.display().to_string()).arg("-w").envs(&env).timeout(Duration::from_secs(120)));
+    }
+    // Done last, so the recipe's steps and installer could still replace any DLL.
+    match wine_dir() {
+        Some(dir) if runner.is_dry() => runner.note(&format!("link Wine's own DLLs from {} into the prefix", dir.display())),
+        Some(dir) => {
+            let saved = link_builtin_dlls(&prefix, &dir)?;
+            runner.note(&format!("shared {} MB of Wine DLLs instead of copying them", saved / (1024 * 1024)));
+        }
+        None => runner.note("Wine's install directory not found; keeping the prefix's DLL copies"),
+    }
+
     let mut desktop_files = Vec::new();
     for launcher in &recipe.launchers {
         let path = paths.applications.join(desktop_file_name(&recipe.id, &launcher.name));
@@ -121,11 +137,98 @@ pub fn uninstall(paths: &Paths, prefix: &Path, desktop_files: &[PathBuf], runner
         bail!("refusing to delete {}: not a Whistle prefix", prefix.display());
     }
     let env = [("WINEPREFIX".to_owned(), prefix.display().to_string())];
-    let _ = runner.run(&Cmd::new("wineserver").arg("-k").envs(&env));
+    if let Some(server) = wineserver() {
+        let _ = runner.run(&Cmd::new(server.display().to_string()).arg("-k").envs(&env));
+        let _ = runner.run(&Cmd::new(server.display().to_string()).arg("-w").envs(&env).timeout(Duration::from_secs(30)));
+    }
     for file in desktop_files {
         remove_path(runner, file)?;
     }
     remove_path(runner, prefix)
+}
+
+/// Where Wine keeps its own Windows DLLs (`x86_64-windows`, `i386-windows`) and `wineserver`.
+pub fn wine_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(root) = which::which("wine").ok().and_then(|w| w.canonicalize().ok()).and_then(|w| Some(w.parent()?.parent()?.to_owned())) {
+        for rel in ["lib/wine", "lib64/wine", "lib/x86_64-linux-gnu/wine"] {
+            candidates.push(root.join(rel));
+        }
+    }
+    candidates.extend(["/usr/lib/x86_64-linux-gnu/wine", "/usr/lib/wine", "/usr/lib64/wine"].map(PathBuf::from));
+    candidates.into_iter().find(|d| d.join("x86_64-windows").is_dir())
+}
+
+/// `wineserver` is often not on PATH (Debian and Ubuntu keep it in the Wine dir).
+pub fn wineserver() -> Option<PathBuf> {
+    which::which("wineserver")
+        .ok()
+        .or_else(|| wine_dir().map(|d| d.join("wineserver")).filter(|p| p.is_file()))
+}
+
+/// Replace the prefix's copies of Wine's own DLLs with symlinks to them.
+///
+/// Wine copies about 1.1 GB of DLLs into every prefix. Linking them back is
+/// safe only because the targets are read-only to us: a Windows program that
+/// tries to overwrite one gets "access denied" instead of changing Wine's file
+/// (and so every other prefix). Files the recipe changed no longer match and
+/// stay as they are. Returns the bytes saved.
+pub fn link_builtin_dlls(prefix: &Path, wine_dir: &Path) -> Result<u64> {
+    let mut saved = 0;
+    for (sub, arch) in [("system32", "x86_64-windows"), ("syswow64", "i386-windows")] {
+        let base = prefix.join("drive_c/windows").join(sub);
+        for dir in [base.clone(), base.join("drivers")] {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let target = wine_dir.join(arch).join(entry.file_name());
+                let len = entry.metadata()?.len();
+                let matches = std::fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == len);
+                if !matches || is_writable(&target) || !same_content(&entry.path(), &target)? {
+                    continue;
+                }
+                let path = entry.path();
+                let tmp = path.with_extension("whistle-link");
+                let _ = std::fs::remove_file(&tmp);
+                symlink(&target, &tmp)?;
+                std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+                saved += len;
+            }
+        }
+    }
+    Ok(saved)
+}
+
+fn is_writable(path: &Path) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+fn same_content(a: &Path, b: &Path) -> Result<bool> {
+    let (mut fa, mut fb) = (File::open(a)?, File::open(b)?);
+    let (mut ba, mut bb) = (vec![0; 64 * 1024], vec![0; 64 * 1024]);
+    loop {
+        let n = fa.read(&mut ba)?;
+        if n == 0 {
+            return Ok(fb.read(&mut bb[..1])? == 0);
+        }
+        fb.read_exact(&mut bb[..n]).map_err(|_| anyhow::anyhow!("short read"))?;
+        if ba[..n] != bb[..n] {
+            return Ok(false);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "symlinks need a Unix host"))
 }
 
 /// Get the installer onto disk and prove it is the expected file.
@@ -370,6 +473,41 @@ mod tests {
         let err = install(&recipe("com.microsoft.Office"), &Paths::under(&dir), &DryRunner::default(), Some(&setup));
         assert!(err.unwrap_err().to_string().contains("doesn't match"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_only_identical_read_only_dlls() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("whistle-link-{}", std::process::id()));
+        let wine = root.join("wine/x86_64-windows");
+        let sys32 = root.join("pfx/drive_c/windows/system32");
+        std::fs::create_dir_all(&wine).unwrap();
+        std::fs::create_dir_all(&sys32).unwrap();
+        for (name, wine_body, prefix_body, read_only) in [
+            ("same.dll", "MZ same", "MZ same", true),
+            ("changed.dll", "MZ wine", "MZ native", true),
+            ("writable.dll", "MZ same", "MZ same", false),
+        ] {
+            std::fs::write(wine.join(name), wine_body).unwrap();
+            if read_only {
+                std::fs::set_permissions(wine.join(name), std::fs::Permissions::from_mode(0o444)).unwrap();
+            }
+            std::fs::write(sys32.join(name), prefix_body).unwrap();
+        }
+        if is_writable(&wine.join("same.dll")) {
+            eprintln!("skipping: running as root");
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let saved = link_builtin_dlls(&root.join("pfx"), &root.join("wine")).unwrap();
+        assert_eq!(saved, 7);
+        assert_eq!(std::fs::read_link(sys32.join("same.dll")).unwrap(), wine.join("same.dll"));
+        assert!(std::fs::read_link(sys32.join("changed.dll")).is_err(), "a DLL the recipe replaced stays");
+        assert!(std::fs::read_link(sys32.join("writable.dll")).is_err(), "never link to a file we could write through");
+        std::fs::set_permissions(wine.join("same.dll"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(wine.join("changed.dll"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

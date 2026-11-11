@@ -269,7 +269,7 @@
         {
           "id": "org.notepad-plus-plus.NotepadPlusPlus",
           "runtime": "wine",
-          "status": "community",
+          "status": "verified",
           "revision": 1,
           "spec": {
             "schema_version": 1,
