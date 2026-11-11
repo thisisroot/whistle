@@ -1,0 +1,16 @@
+[package]
+name = "whistle-cli"
+description = "The whistle command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "whistle"
+path = "src/main.rs"
+
+[dependencies]
+whistle-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
