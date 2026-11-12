@@ -149,6 +149,7 @@ pub fn distro_package(name: &str, host: &Host) -> Option<App> {
         screenshots: Vec::new(),
         homepage: String::new(),
         license: String::new(),
+        popularity: 0,
         sources: vec![Source {
             kind,
             reference: name.to_owned(),

@@ -19,6 +19,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#the-app-store-window">App</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#safety">Safety</a> ·
@@ -86,6 +87,22 @@ whistle update            # download the latest catalog
 whistle doctor            # what Whistle sees on this machine
 whistle install gimp
 ```
+
+### The app store window
+
+<p align="center">
+  <img src="assets/app.png" width="760" alt="The Whistle app: a featured app with its screenshot, how many apps this computer can install, and popular apps">
+</p>
+
+Prefer clicking to typing? Get the Whistle app from the
+[latest release](https://github.com/thisisroot/whistle/releases/latest): the
+`.deb` for Debian and Ubuntu, the `.rpm` for Fedora and openSUSE, or the
+`.AppImage` for any distro. It shows the same catalog with icons and
+screenshots, lets you pick how each app is installed, and keeps what you
+installed up to date. Like the command, it only offers apps and install methods
+that work on your computer; command-line packages such as `htop` stay with
+`whistle install`. Search puts popular apps first: "code" finds Visual Studio
+Code, "office" finds LibreOffice.
 
 <details>
 <summary>Other ways to install</summary>
@@ -245,6 +262,18 @@ cargo clippy --all-targets -- -D warnings
 tests/distros/run.sh path/to/index.json # real distros, needs Docker
 ```
 
+The app store window is a [Tauri](https://tauri.app) app with a Svelte
+frontend. It needs Node 22 and WebKitGTK (`libwebkit2gtk-4.1-dev`,
+`libayatana-appindicator3-dev` and `librsvg2-dev` on Debian and Ubuntu), so a
+plain `cargo build` leaves it out:
+
+```sh
+cd crates/whistle-gui
+npm --prefix ui ci
+npx --prefix ui tauri dev               # run it, reloading on changes
+npx --prefix ui tauri build             # .deb, .rpm and .AppImage
+```
+
 `tests/distros/run.sh` runs Whistle inside Arch, Debian, Ubuntu, Fedora and
 openSUSE containers. It checks that every package the catalog lists for that
 distro exists, then installs and removes one app for real. The recipe test reads
@@ -253,18 +282,19 @@ to this one, or the folder in `WHISTLE_RECIPES_DIR`.
 
 | Path | Contents |
 | --- | --- |
-| [`crates/whistle-core`](crates/whistle-core) | Catalog, host detection, resolver, installers. Shared by the CLI and the future desktop app. |
+| [`crates/whistle-core`](crates/whistle-core) | Catalog, host detection, resolver, installers. Shared by the CLI and the app store window. |
 | [`crates/whistle-cli`](crates/whistle-cli) | The `whistle` command. |
+| [`crates/whistle-gui`](crates/whistle-gui) | The app store window: Rust commands in `src/`, the Svelte frontend in `ui/`. |
 | [`catalog/dev-index.json`](catalog/dev-index.json) | The built-in catalog. |
 | [`tests/distros`](tests/distros) | Real-distro container tests. |
 | [`install.sh`](install.sh) | The one-line installer. |
-| [`.github/workflows`](.github/workflows) | CI, and the release build (push a `v*` tag matching `Cargo.toml`). |
+| [`.github/workflows`](.github/workflows) | CI, and the release build of the command and the app (push a `v*` tag matching `Cargo.toml`). |
 
 ### The Whistle project
 
 | Repo | Role |
 | --- | --- |
-| **whistle** (this repo) | The client: CLI now, desktop app later. |
+| **whistle** (this repo) | The clients: the `whistle` command and the app store window. |
 | [whistle-server](https://github.com/thisisroot/whistle-server) | Builds and publishes the catalog. |
 | [whistle-recipes](https://github.com/thisisroot/whistle-recipes) | Recipes for running apps on the other OS. |
 
@@ -279,10 +309,11 @@ to this one, or the folder in `WHISTLE_RECIPES_DIR`.
 - [x] Signed catalog
 - [x] All Flathub and distro apps, every distro package, 12,000 Windows apps from winget
 - [x] Icons and screenshots
+- [x] App store window
+- [ ] Whistle on Windows
+- [ ] Linux apps on Windows through WSL
 - [ ] Automatic testing of generated Windows recipes in a sandbox
 - [ ] Reporting whether an app works back to the catalog
-- [ ] Proton, WSL and VM runtimes
-- [ ] Desktop app
 
 ## License
 

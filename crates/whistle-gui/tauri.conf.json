@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Whistle",
+  "identifier": "io.github.thisisroot.Whistle",
+  "build": {
+    "beforeDevCommand": {
+      "script": "npm run dev",
+      "cwd": "ui"
+    },
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "ui"
+    },
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Whistle",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 720,
+        "minHeight": 560,
+        "backgroundColor": "#0F1115"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "category": "Utility",
+    "shortDescription": "Every app, for any Linux distro",
+    "license": "GPL-3.0-or-later",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "longDescription": "Whistle is one app store for every Linux distro, with Windows apps included. It installs each app the best way your computer allows: your distro's own package, a Flatpak, or a Windows app through Wine.",
+    "homepage": "https://github.com/thisisroot/whistle"
+  }
+}

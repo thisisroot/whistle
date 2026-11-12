@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/whistle-core", "crates/whistle-cli"]
+members = ["crates/whistle-core", "crates/whistle-cli", "crates/whistle-gui"]
+# The GUI needs WebKitGTK and a built frontend; build it with `-p whistle-gui`.
+default-members = ["crates/whistle-core", "crates/whistle-cli"]
 
 [workspace.package]
 version = "0.2.0"

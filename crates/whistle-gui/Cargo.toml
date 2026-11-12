@@ -1,0 +1,26 @@
+[package]
+name = "whistle-gui"
+description = "The Whistle app store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "whistle-gui"
+path = "src/main.rs"
+
+[dependencies]
+whistle-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Launching installed apps from their menu entries; Tauri links it through GTK.
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.18"

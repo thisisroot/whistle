@@ -124,6 +124,12 @@ pub fn install(
     }
     create_dir(runner, &prefix)?;
     runner.run(&Cmd::new("wineboot").arg("--init").envs(&env))?;
+    if on_wslg() {
+        // WSLg's X11 window manager lacks most of what Wine needs to stack and
+        // focus windows (dialogs under a splash screen never get clicks), so
+        // use Wine's Wayland driver there, falling back to X11.
+        apply_reg(runner, &prefix, "wayland", WAYLAND_DRIVER, &env)?;
+    }
 
     for (n, step) in recipe.steps.iter().enumerate() {
         match step {
@@ -135,7 +141,7 @@ pub fn install(
                 for (dll, mode) in dlls {
                     writeln!(reg, "\"{}\"=\"{}\"\r", reg_escape(dll), reg_escape(mode))?;
                 }
-                apply_reg(runner, &prefix, n, &reg, &env)?;
+                apply_reg(runner, &prefix, &format!("step-{n}"), &reg, &env)?;
             }
             Step::Registry(step) => {
                 let mut reg = format!("[{}]\r\n", reg_root(&step.key)?);
@@ -149,7 +155,7 @@ pub fn install(
                         }
                     }
                 }
-                apply_reg(runner, &prefix, n, &reg, &env)?;
+                apply_reg(runner, &prefix, &format!("step-{n}"), &reg, &env)?;
             }
             Step::Copy(copy) => {
                 let from = media_path(&media, &copy.from)?;
@@ -641,14 +647,30 @@ fn acquire(
     }
 }
 
+/// Wine's display drivers, in the order to try them.
+const WAYLAND_DRIVER: &str =
+    "[HKEY_CURRENT_USER\\Software\\Wine\\Drivers]\r\n\"Graphics\"=\"wayland,x11\"\r\n";
+
+/// Running under WSLg, Windows' Wayland compositor for WSL.
+fn on_wslg() -> bool {
+    wslg(
+        &std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default(),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+    )
+}
+
+fn wslg(osrelease: &str, wayland_display: Option<&std::ffi::OsStr>) -> bool {
+    osrelease.to_lowercase().contains("microsoft") && wayland_display.is_some_and(|d| !d.is_empty())
+}
+
 fn apply_reg(
     runner: &dyn Runner,
     prefix: &Path,
-    step: usize,
+    name: &str,
     body: &str,
     env: &[(String, String)],
 ) -> Result<()> {
-    let file = prefix.join("whistle").join(format!("step-{step}.reg"));
+    let file = prefix.join("whistle").join(format!("{name}.reg"));
     write_file(runner, &file, &format!("REGEDIT4\r\n\r\n{body}"))?;
     runner.run(
         &Cmd::new("wine")
@@ -866,6 +888,17 @@ mod tests {
     }
 
     #[test]
+    fn wayland_driver_only_under_wslg() {
+        use std::ffi::OsStr;
+        let wsl = "6.18.33.1-microsoft-standard-WSL2";
+        assert!(wslg(wsl, Some(OsStr::new("wayland-0"))));
+        assert!(!wslg(wsl, None));
+        assert!(!wslg(wsl, Some(OsStr::new(""))));
+        assert!(!wslg("6.12.1-arch1-1", Some(OsStr::new("wayland-0"))));
+        assert!(WAYLAND_DRIVER.contains(r#""Graphics"="wayland,x11""#));
+    }
+
+    #[test]
     fn dry_run_plans_every_step() {
         let paths = Paths::under(Path::new("/w"));
         let runner = DryRunner::default();
@@ -879,8 +912,10 @@ mod tests {
             cmds[0].starts_with("WINEPREFIX=/w/data/prefixes/")
                 && cmds[0].ends_with("wineboot --init")
         );
+        // On WSL a registry command comes between them.
         assert!(
-            cmds[1].ends_with("npp.8.9.9.Installer.x64.exe /S"),
+            cmds.iter()
+                .any(|c| c.ends_with("npp.8.9.9.Installer.x64.exe /S")),
             "{cmds:?}"
         );
         assert_eq!(
@@ -920,7 +955,7 @@ mod tests {
         );
         assert_eq!(
             cmds.iter()
-                .filter(|c| c.contains("wine regedit /S"))
+                .filter(|c| c.contains("wine regedit /S") && c.contains("/step-"))
                 .count(),
             2
         );

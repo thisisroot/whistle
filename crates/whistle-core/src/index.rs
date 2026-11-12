@@ -25,6 +25,15 @@ const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 /// them, for catalogs published by someone else.
 const TRUSTED_KEYS: &[&str] = &["RWRlRc/lhixaEkgN7SMrn4oxizAm3Qhl7RD6vr/wduv6wxpTJk4ifQrW"];
 
+/// Whether a word of `name` (split at spaces and punctuation) starts with `query`.
+fn name_word_starts_with(name: &str, query: &str) -> bool {
+    !query.is_empty()
+        && (name.starts_with(query)
+            || name
+                .match_indices(|c: char| !c.is_alphanumeric())
+                .any(|(i, sep)| name[i + sep.len()..].starts_with(query)))
+}
+
 /// Small hand-written catalog used until a real index has been fetched.
 const DEV_INDEX: &str = include_str!("../../../catalog/dev-index.json");
 
@@ -54,6 +63,10 @@ pub struct App {
     /// SPDX expression, or `LicenseRef-proprietary`.
     #[serde(default)]
     pub license: String,
+    /// How widely it's used, 0 to 1000 (a percentile of Flathub installs or
+    /// Debian popcon). Search puts popular apps first.
+    #[serde(default)]
+    pub popularity: u16,
     #[serde(default, deserialize_with = "skip_unreadable")]
     pub sources: Vec<Source>,
     #[serde(default, deserialize_with = "skip_unreadable")]
@@ -263,30 +276,46 @@ impl Index {
     }
 
     /// Apps whose id, name or summary contains `query`, best matches first.
+    /// Apps matching `query`, best first: how well the name matches plus how
+    /// popular the app is. A close name match leads, but popularity can
+    /// overtake it, so "code" finds Visual Studio Code before a little-used
+    /// app called Code, and "office" finds LibreOffice.
     pub fn search(&self, query: &str) -> Vec<&App> {
-        let q = query.to_lowercase();
-        let mut hits: Vec<(u8, &App)> = self
+        let q = query.trim().to_lowercase();
+        let mut hits: Vec<(u16, &App)> = self
             .apps
             .iter()
             .filter_map(|app| {
                 let name = app.name.to_lowercase();
-                let rank = if name == q || app.id.to_lowercase() == q {
-                    0
-                } else if name.starts_with(&q) {
-                    1
-                } else if name.contains(&q) || app.id.to_lowercase().contains(&q) {
-                    2
+                let id = app.id.to_lowercase();
+                // The app's own part of its id: "code" in com.visualstudio.code,
+                // not the publisher's domain.
+                let id_tail = id
+                    .trim_end_matches(".desktop")
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("");
+                let bonus = if name == q || id == q {
+                    400
+                } else if name_word_starts_with(&name, &q) || id_tail.starts_with(&q) {
+                    300
+                } else if name.contains(&q) || id_tail.contains(&q) {
+                    250
                 } else if app.summary.to_lowercase().contains(&q) {
-                    3
+                    0
                 } else {
                     return None;
                 };
-                Some((rank, app))
+                Some((app.popularity.min(1000) + bonus, app))
             })
             .collect();
-        // Equally good matches: apps that install on Linux before Windows-only twins.
-        hits.sort_by_cached_key(|(rank, app)| {
-            (*rank, !app.has_linux_source(), app.name.to_lowercase())
+        // Equal scores: apps that install on Linux before Windows-only twins.
+        hits.sort_by_cached_key(|(score, app)| {
+            (
+                std::cmp::Reverse(*score),
+                !app.has_linux_source(),
+                app.name.to_lowercase(),
+            )
         });
         hits.into_iter().map(|(_, app)| app).collect()
     }
@@ -514,6 +543,35 @@ oD+we1r382ycHPx0yXJ0npPRw/bHuG4CBnct31JezJ2zoO6aa3Y5anDHa/eMRvkMLRr/6WBx8ZkJXWK6
             matches!(index.lookup("tool"), Lookup::One(app) if app.id == "org.example.BlinkTool")
         );
         assert!(matches!(index.lookup("nothing"), Lookup::None));
+    }
+
+    #[test]
+    fn search_puts_popular_name_matches_first() {
+        let index = Index::parse(
+            r#"{"format": 1, "apps": [
+                {"id": "io.elementary.code", "name": "Code", "popularity": 300},
+                {"id": "org.example.Codec", "name": "Codec Pack", "popularity": 10},
+                {"id": "com.visualstudio.code", "name": "Visual Studio Code", "popularity": 990},
+                {"id": "org.example.Barcode", "name": "Barcode Maker", "popularity": 999},
+                {"id": "org.example.Ide", "name": "IDE", "summary": "Write code", "popularity": 1000}
+            ]}"#,
+        )
+        .unwrap();
+        let ids: Vec<&str> = index.search("code").iter().map(|a| a.id.as_str()).collect();
+        // 990+300, 999+250, 1000+0, 300+400, 10+300.
+        assert_eq!(
+            ids,
+            [
+                "com.visualstudio.code",
+                "org.example.Barcode",
+                "org.example.Ide",
+                "io.elementary.code",
+                "org.example.Codec"
+            ]
+        );
+        assert!(name_word_starts_with("visual studio code", "code"));
+        assert!(name_word_starts_with("code::blocks", "blocks"));
+        assert!(!name_word_starts_with("barcode maker", "code"));
     }
 
     #[test]
