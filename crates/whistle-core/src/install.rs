@@ -394,7 +394,12 @@ mod tests {
     fn blocked_candidates_are_refused() {
         let index = Index::builtin();
         let app = index.find("notepad").unwrap();
-        let host = Host::from_parts(Os::Linux, Some("ID=arch\n"), "x86_64", Default::default());
+        let host = Host::from_parts(
+            Os::Linux,
+            Some("ID=arch\n"),
+            "x86_64",
+            [Tool::Pacman].into_iter().collect(),
+        );
         let paths = Paths::under(Path::new("/w"));
         let runner = DryRunner::default();
         let ctx = Ctx {

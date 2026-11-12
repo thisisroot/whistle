@@ -387,7 +387,8 @@ fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) 
             (.., true) => !app.recipes.is_empty() && !app.has_linux_source(),
             _ => true,
         };
-        if keep {
+        // Apps nothing can install on this computer aren't worth showing.
+        if keep && (method.is_some() || setup.is_some()) {
             rows.push((app, method, setup));
         }
     }
@@ -436,7 +437,7 @@ fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) 
                 needs.insert(setup.name);
                 format!("{}*", setup.name.to_lowercase())
             }
-            (None, None) => "unavailable".to_owned(),
+            (None, None) => unreachable!("left out above"),
         };
         println!(
             "{:<20} {:<40} {:<14} {}",
@@ -595,7 +596,22 @@ fn info(app: &App, host: &Host, prefs: &Prefs, json: bool) -> Result<()> {
     println!("\nOn {}:", host.describe());
     let cands = resolve(app, host, prefs);
     if cands.is_empty() {
-        println!("  No way to install this here yet.");
+        let mut systems: Vec<&str> = app
+            .sources
+            .iter()
+            .flat_map(|s| &s.platforms)
+            .map(|p| p.strip_prefix("linux:").unwrap_or(p))
+            .collect();
+        systems.sort_unstable();
+        systems.dedup();
+        if systems.is_empty() {
+            println!("  Nothing can install it here yet.");
+        } else {
+            println!(
+                "  Nothing can install it here yet. It's packaged for: {}.",
+                systems.join(", ")
+            );
+        }
     }
     let chosen = best(&cands).map(|c| c as *const _);
     for (n, c) in cands.iter().enumerate() {

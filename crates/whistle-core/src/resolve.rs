@@ -169,9 +169,54 @@ pub fn resolve<'a>(app: &'a App, host: &Host, prefs: &Prefs) -> Vec<Candidate<'a
             _ => false,
         });
     }
+    // Only what can work here: options that run now, or once Whistle installs
+    // a runtime for them (see `install::runtime_setup`). A method asked for with
+    // `--via` stays, so its reason can be shown.
+    if prefs.via.is_none() {
+        let ready = with_runtimes(host);
+        out.retain(|c| {
+            c.blocker.is_none()
+                || ready
+                    .as_ref()
+                    .is_some_and(|h| blocker_on(&c.target, h, prefs).is_none())
+        });
+    }
     // Stable: equal ranks keep index order, which is the catalog's preference.
     out.sort_by_key(|c| (c.blocker.is_some() && prefs.via.is_none(), c.rank));
+    // Several recipes for one runtime (an app's winget packages, say): only the
+    // best one could ever be picked.
+    let mut runtimes = Vec::new();
+    out.retain(|c| match &c.target {
+        Target::Recipe { entry, .. } if runtimes.contains(&entry.runtime) => false,
+        Target::Recipe { entry, .. } => {
+            runtimes.push(entry.runtime);
+            true
+        }
+        Target::Source(_) => true,
+    });
     out
+}
+
+/// `host` once Whistle has set up every runtime it can install with the
+/// distro's package manager; `None` without one.
+fn with_runtimes(host: &Host) -> Option<Host> {
+    crate::packages::manager(host)?;
+    let mut ready = host.clone();
+    ready
+        .tools
+        .extend([Tool::Flatpak, Tool::Wine, Tool::Winetricks]);
+    Some(ready)
+}
+
+fn blocker_on(target: &Target, host: &Host, prefs: &Prefs) -> Option<String> {
+    match target {
+        Target::Source(source) => source_blocker(source, host),
+        Target::Recipe {
+            entry,
+            recipe: Some(recipe),
+        } => recipe_blocker(entry, recipe, host, prefs),
+        Target::Recipe { recipe: None, .. } => Some("unreadable recipe".into()),
+    }
 }
 
 /// The first option that can be used.
@@ -265,13 +310,37 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_options_sink_with_a_reason() {
+    fn options_whistle_can_set_up_sink_with_a_reason() {
         let index = Index::builtin();
         let app = index.find("firefox").unwrap();
-        let arch = host("ID=arch\n", &[Tool::Flatpak, Tool::Sudo]);
-        let cands = resolve(app, &arch, &Prefs::default());
-        assert_eq!(methods(&cands), ["flatpak", "pacman!"]);
-        assert_eq!(cands[1].blocker.as_deref(), Some("pacman is not installed"));
+        let ubuntu = host("ID=ubuntu\nID_LIKE=debian\n", &[Tool::AptGet, Tool::Sudo]);
+        let cands = resolve(app, &ubuntu, &Prefs::default());
+        assert_eq!(methods(&cands), ["apt", "flatpak!"]);
+        assert_eq!(
+            cands[1].blocker.as_deref(),
+            Some("flatpak is not installed")
+        );
+        // Without sudo, Whistle can't use apt and can't set it up either.
+        let no_sudo = host("ID=ubuntu\nID_LIKE=debian\n", &[Tool::AptGet]);
+        assert_eq!(
+            methods(&resolve(app, &no_sudo, &Prefs::default())),
+            ["flatpak!"]
+        );
+    }
+
+    #[test]
+    fn options_that_cannot_work_here_are_left_out() {
+        let index = Index::builtin();
+        let app = index.find("firefox").unwrap();
+        // No pacman, and no package manager to set Flatpak up with.
+        let arch = host("ID=arch\n", &[Tool::Sudo]);
+        assert!(resolve(app, &arch, &Prefs::default()).is_empty());
+        // Asking for it by name still explains why it can't work.
+        let prefs = Prefs {
+            via: Some(Via::Native),
+            ..Prefs::default()
+        };
+        assert_eq!(methods(&resolve(app, &arch, &prefs)), ["pacman!"]);
     }
 
     #[test]
@@ -292,8 +361,8 @@ mod tests {
     fn drafts_need_opt_in() {
         let index = Index::builtin();
         let office = index.find("com.microsoft.Office").unwrap();
-        let h = host("ID=arch\n", &[Tool::Wine]);
-        assert!(best(&resolve(office, &h, &Prefs::default())).is_none());
+        let h = host("ID=arch\n", &[Tool::Pacman, Tool::Wine]);
+        assert!(resolve(office, &h, &Prefs::default()).is_empty());
         let prefs = Prefs {
             allow_draft: true,
             ..Prefs::default()
@@ -302,7 +371,7 @@ mod tests {
             resolve(office, &h, &prefs)[0].blocker.as_deref(),
             Some("winetricks is not installed")
         );
-        let h = host("ID=arch\n", &[Tool::Wine, Tool::Winetricks]);
+        let h = host("ID=arch\n", &[Tool::Pacman, Tool::Wine, Tool::Winetricks]);
         assert!(best(&resolve(office, &h, &prefs)).is_some());
     }
 
@@ -355,10 +424,13 @@ mod tests {
         let app = index.find("org.gnome.Builder").unwrap();
         let linux = host("ID=arch\n", &[Tool::Pacman, Tool::Sudo]);
         assert!(!methods(&resolve(app, &linux, &Prefs::default())).contains(&"wsl!".to_owned()));
+        // WSL recipes can't run yet, so Windows shows them only when asked for.
         let windows = Host::from_parts(Os::Windows, None, "x86_64", BTreeSet::new());
-        assert_eq!(
-            methods(&resolve(app, &windows, &Prefs::default())),
-            ["wsl!"]
-        );
+        assert!(resolve(app, &windows, &Prefs::default()).is_empty());
+        let prefs = Prefs {
+            via: Some("wsl".parse().unwrap()),
+            ..Prefs::default()
+        };
+        assert_eq!(methods(&resolve(app, &windows, &prefs)), ["wsl!"]);
     }
 }
