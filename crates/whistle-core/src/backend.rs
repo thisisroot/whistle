@@ -24,20 +24,41 @@ pub fn tool_for(kind: SourceKind) -> Option<Tool> {
 
 /// Prefix system package managers with sudo unless we're already root.
 fn privileged(host: &Host, program: &str) -> Cmd {
-    if host.is_root { Cmd::new(program) } else { Cmd::new("sudo").arg(program) }
+    if host.is_root {
+        Cmd::new(program)
+    } else {
+        Cmd::new("sudo").arg(program)
+    }
 }
 
 pub fn install_cmds(kind: SourceKind, reference: &str, host: &Host) -> Result<Vec<Cmd>> {
     check_ref(reference)?;
     Ok(match kind {
-        SourceKind::Pacman => vec![privileged(host, "pacman").args(["-S", "--needed", "--noconfirm", reference])],
+        SourceKind::Pacman => {
+            vec![privileged(host, "pacman").args(["-S", "--needed", "--noconfirm", reference])]
+        }
         SourceKind::Apt => vec![privileged(host, "apt-get").args(["install", "-y", reference])],
         SourceKind::Dnf => vec![privileged(host, "dnf").args(["install", "-y", reference])],
-        SourceKind::Zypper => vec![privileged(host, "zypper").args(["--non-interactive", "install", reference])],
+        SourceKind::Zypper => {
+            vec![privileged(host, "zypper").args(["--non-interactive", "install", reference])]
+        }
         // Per-user installs: no sudo, and nothing touches the system.
         SourceKind::Flatpak => vec![
-            Cmd::new("flatpak").args(["remote-add", "--user", "--if-not-exists", "flathub", FLATHUB]),
-            Cmd::new("flatpak").args(["install", "--user", "-y", "--noninteractive", "flathub", reference]),
+            Cmd::new("flatpak").args([
+                "remote-add",
+                "--user",
+                "--if-not-exists",
+                "flathub",
+                FLATHUB,
+            ]),
+            Cmd::new("flatpak").args([
+                "install",
+                "--user",
+                "-y",
+                "--noninteractive",
+                "flathub",
+                reference,
+            ]),
         ],
         SourceKind::Winget => vec![Cmd::new("winget").args([
             "install",
@@ -56,12 +77,24 @@ pub fn install_cmds(kind: SourceKind, reference: &str, host: &Host) -> Result<Ve
 pub fn remove_cmds(kind: SourceKind, reference: &str, host: &Host) -> Result<Vec<Cmd>> {
     check_ref(reference)?;
     Ok(match kind {
-        SourceKind::Pacman => vec![privileged(host, "pacman").args(["-Rs", "--noconfirm", reference])],
+        SourceKind::Pacman => {
+            vec![privileged(host, "pacman").args(["-Rs", "--noconfirm", reference])]
+        }
         SourceKind::Apt => vec![privileged(host, "apt-get").args(["remove", "-y", reference])],
         SourceKind::Dnf => vec![privileged(host, "dnf").args(["remove", "-y", reference])],
-        SourceKind::Zypper => vec![privileged(host, "zypper").args(["--non-interactive", "remove", reference])],
-        SourceKind::Flatpak => vec![Cmd::new("flatpak").args(["uninstall", "--user", "-y", "--noninteractive", reference])],
-        SourceKind::Winget => vec![Cmd::new("winget").args(["uninstall", "--id", reference, "--exact"])],
+        SourceKind::Zypper => {
+            vec![privileged(host, "zypper").args(["--non-interactive", "remove", reference])]
+        }
+        SourceKind::Flatpak => vec![Cmd::new("flatpak").args([
+            "uninstall",
+            "--user",
+            "-y",
+            "--noninteractive",
+            reference,
+        ])],
+        SourceKind::Winget => {
+            vec![Cmd::new("winget").args(["uninstall", "--id", reference, "--exact"])]
+        }
         SourceKind::Appimage | SourceKind::VendorInstaller | SourceKind::Wsl => {
             bail!("{kind} is not removed through a package manager")
         }
@@ -70,8 +103,13 @@ pub fn remove_cmds(kind: SourceKind, reference: &str, host: &Host) -> Result<Vec
 
 /// Package refs come from the index; make sure one can't pass itself off as an option.
 fn check_ref(reference: &str) -> Result<()> {
-    let ok = reference.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && reference.chars().all(|c| c.is_ascii_alphanumeric() || "._+:/@-".contains(c));
+    let ok = reference
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && reference
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+:/@-".contains(c));
     if !ok {
         bail!("invalid package reference {reference:?}");
     }
@@ -109,7 +147,10 @@ mod tests {
     #[test]
     fn flatpak_is_per_user() {
         let cmds = shown(install_cmds(SourceKind::Flatpak, "org.gimp.GIMP", &host(false)).unwrap());
-        assert_eq!(cmds[1], "flatpak install --user -y --noninteractive flathub org.gimp.GIMP");
+        assert_eq!(
+            cmds[1],
+            "flatpak install --user -y --noninteractive flathub org.gimp.GIMP"
+        );
         assert!(!cmds.iter().any(|c| c.starts_with("sudo")));
     }
 

@@ -192,7 +192,10 @@ impl Recipe {
     pub fn from_value(spec: &serde_json::Value) -> Result<Self> {
         let recipe: Self = serde_json::from_value(spec.clone())?;
         if recipe.schema_version != SCHEMA_VERSION {
-            bail!("recipe schema version {} is not supported", recipe.schema_version);
+            bail!(
+                "recipe schema version {} is not supported",
+                recipe.schema_version
+            );
         }
         recipe.check()?;
         Ok(recipe)
@@ -211,15 +214,26 @@ impl Recipe {
         for step in &self.steps {
             match step {
                 Step::Copy(copy) => {
-                    if copy.from.starts_with(['/', '\\']) || copy.from.contains("..") || copy.from.contains(':') {
-                        bail!("copy: {:?} must be a relative path inside the installer media", copy.from);
+                    if copy.from.starts_with(['/', '\\'])
+                        || copy.from.contains("..")
+                        || copy.from.contains(':')
+                    {
+                        bail!(
+                            "copy: {:?} must be a relative path inside the installer media",
+                            copy.from
+                        );
                     }
                     check_windows_path(&copy.to)?;
                 }
                 Step::Env(vars) => {
                     for name in vars.keys() {
-                        let valid = name.chars().next().is_some_and(|c| c.is_ascii_uppercase() || c == '_')
-                            && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+                        let valid = name
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+                            && name
+                                .chars()
+                                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
                         if !valid || BLOCKED_ENV.contains(&name.as_str()) {
                             bail!("env: setting {name} is not allowed");
                         }
@@ -230,9 +244,17 @@ impl Recipe {
                 }
                 Step::DllOverride(dlls) => {
                     for (dll, mode) in dlls {
-                        let ok_mode = ["native", "builtin", "native,builtin", "builtin,native", "disabled"]
-                            .contains(&mode.as_str());
-                        let ok_name = dll.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
+                        let ok_mode = [
+                            "native",
+                            "builtin",
+                            "native,builtin",
+                            "builtin,native",
+                            "disabled",
+                        ]
+                        .contains(&mode.as_str());
+                        let ok_name = dll
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
                         if !ok_mode || !ok_name {
                             bail!("dll_override: {dll}={mode} is not allowed");
                         }
@@ -240,7 +262,11 @@ impl Recipe {
                 }
                 Step::Winetricks(verbs) => {
                     for verb in verbs {
-                        if verb.is_empty() || !verb.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_=.".contains(c)) {
+                        if verb.is_empty()
+                            || !verb.chars().all(|c| {
+                                c.is_ascii_lowercase() || c.is_ascii_digit() || "_=.".contains(c)
+                            })
+                        {
                             bail!("winetricks: {verb:?} is not a valid verb");
                         }
                     }
@@ -255,7 +281,8 @@ impl Recipe {
 /// `C:\...` with no `..` component.
 pub fn check_windows_path(path: &str) -> Result<()> {
     let bytes = path.as_bytes();
-    let drive = bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    let drive =
+        bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
     if !drive || path.contains("..") || path.contains('\n') {
         bail!("{path:?} must be an absolute Windows path like C:\\Program Files\\App\\app.exe");
     }
@@ -279,23 +306,37 @@ pub fn reg_root(key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::PathBuf;
 
-    const RECIPES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../whistle-recipes/recipes");
+    /// A whistle-recipes checkout: `$WHISTLE_RECIPES_DIR`, else the sibling folder.
+    fn recipes_dir() -> PathBuf {
+        let repo = std::env::var_os("WHISTLE_RECIPES_DIR").map_or_else(
+            || {
+                PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../../whistle-recipes"
+                ))
+            },
+            PathBuf::from,
+        );
+        repo.join("recipes")
+    }
 
     #[test]
     fn parses_every_recipe_in_whistle_recipes() {
-        let dir = Path::new(RECIPES);
+        let dir = recipes_dir();
         if !dir.is_dir() {
-            eprintln!("skipping: {RECIPES} not found");
+            eprintln!("skipping: {} not found", dir.display());
             return;
         }
         let mut count = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|e| e == "yaml" || e == "yml") {
-                let yaml: serde_json::Value = serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-                let recipe = Recipe::from_value(&yaml).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                let yaml: serde_json::Value =
+                    serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                let recipe = Recipe::from_value(&yaml)
+                    .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
                 assert_eq!(path.file_stem().unwrap().to_str().unwrap(), recipe.id);
                 count += 1;
             }
@@ -316,7 +357,9 @@ mod tests {
             "launchers": [{"name": "App", "exe": "C:\\App\\app.exe"}]
         }))
         .unwrap();
-        let Step::Registry(reg) = &recipe.steps[1] else { panic!() };
+        let Step::Registry(reg) = &recipe.steps[1] else {
+            panic!()
+        };
         assert_eq!(reg.value["a"], RegValue::Dword(1));
         assert_eq!(reg.value["b"], RegValue::String("s".into()));
     }
@@ -333,10 +376,18 @@ mod tests {
     #[test]
     fn rejects_sandbox_escapes() {
         assert!(with_step(serde_json::json!({"env": {"LD_PRELOAD": "/x.so"}})).is_err());
-        assert!(with_step(serde_json::json!({"copy": {"from": "../etc/passwd", "to": "C:\\x"}})).is_err());
-        assert!(with_step(serde_json::json!({"copy": {"from": "a", "to": "C:\\..\\..\\x"}})).is_err());
+        assert!(
+            with_step(serde_json::json!({"copy": {"from": "../etc/passwd", "to": "C:\\x"}}))
+                .is_err()
+        );
+        assert!(
+            with_step(serde_json::json!({"copy": {"from": "a", "to": "C:\\..\\..\\x"}})).is_err()
+        );
         assert!(with_step(serde_json::json!({"shell": "rm -rf ~"})).is_err());
-        assert!(with_step(serde_json::json!({"registry": {"key": "HKCR\\x", "value": {"a": 1}}})).is_err());
+        assert!(
+            with_step(serde_json::json!({"registry": {"key": "HKCR\\x", "value": {"a": 1}}}))
+                .is_err()
+        );
         assert!(with_step(serde_json::json!({"winetricks": ["a; rm -rf ~"]})).is_err());
     }
 }

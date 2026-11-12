@@ -35,7 +35,13 @@ pub fn verify(path: &Path, allowed: &[String]) -> Result<String> {
 pub fn file_name_for(url: &str, file_name: Option<&str>) -> Result<String> {
     let name = file_name
         .map(str::to_owned)
-        .or_else(|| url.split(['?', '#']).next()?.rsplit('/').next().map(str::to_owned))
+        .or_else(|| {
+            url.split(['?', '#'])
+                .next()?
+                .rsplit('/')
+                .next()
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
         bail!("can't pick a file name for {url}");
@@ -48,7 +54,9 @@ pub fn download_text(url: &str, max_bytes: u64) -> Result<String> {
     if !url.starts_with("https://") {
         bail!("refusing to download over plain HTTP: {url}");
     }
-    let response = ureq::get(url).call().with_context(|| format!("downloading {url}"))?;
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
     let mut text = String::new();
     response
         .into_body()
@@ -76,7 +84,9 @@ pub fn download_verified(url: &str, sha256: &str, dir: &Path, name: &str) -> Res
     std::fs::create_dir_all(dir)?;
     let partial = dir.join(format!("{name}.part"));
     eprintln!("downloading {url}");
-    let response = ureq::get(url).call().with_context(|| format!("downloading {url}"))?;
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
     let mut reader = response.into_body().into_reader();
     let mut out = File::create(&partial)?;
     let mut buf = vec![0; 64 * 1024];
@@ -116,8 +126,14 @@ mod tests {
 
     #[test]
     fn file_names() {
-        assert_eq!(file_name_for("https://x.org/a/b.exe?x=1", None).unwrap(), "b.exe");
-        assert_eq!(file_name_for("https://x.org/a/", Some("c.exe")).unwrap(), "c.exe");
+        assert_eq!(
+            file_name_for("https://x.org/a/b.exe?x=1", None).unwrap(),
+            "b.exe"
+        );
+        assert_eq!(
+            file_name_for("https://x.org/a/", Some("c.exe")).unwrap(),
+            "c.exe"
+        );
         assert!(file_name_for("https://x.org/a/", None).is_err());
         assert!(file_name_for("https://x.org/a", Some("../x")).is_err());
     }

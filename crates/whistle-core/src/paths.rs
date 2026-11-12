@@ -22,7 +22,8 @@ impl Paths {
         if let Some(root) = std::env::var_os("WHISTLE_ROOT") {
             return Ok(Self::under(Path::new(&root)));
         }
-        let project = ProjectDirs::from("", "", "whistle").context("can't find the home directory")?;
+        let project =
+            ProjectDirs::from("", "", "whistle").context("can't find the home directory")?;
         let base = BaseDirs::new().context("can't find the home directory")?;
         Ok(Self {
             data: project.data_dir().to_owned(),

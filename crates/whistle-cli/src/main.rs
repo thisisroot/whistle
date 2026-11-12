@@ -101,14 +101,32 @@ fn run(cli: Cli) -> Result<()> {
         Command::Search { query } => search(&load()?.0, &host, &query.join(" ")),
         Command::Info { app, allow_draft } => {
             let (index, _) = load()?;
-            info(index.find(&app)?, &host, &Prefs { via: None, allow_draft })
+            info(
+                index.find(&app)?,
+                &host,
+                &Prefs {
+                    via: None,
+                    allow_draft,
+                },
+            )
         }
-        Command::Install { app, via, dry_run, yes, file, allow_draft } => {
+        Command::Install {
+            app,
+            via,
+            dry_run,
+            yes,
+            file,
+            allow_draft,
+        } => {
             let (index, _) = load()?;
             let app = index.find(&app)?;
             let prefs = Prefs { via, allow_draft };
             let runner = runner(dry_run);
-            let ctx = Ctx { host: &host, paths: &paths, runner: runner.as_ref() };
+            let ctx = Ctx {
+                host: &host,
+                paths: &paths,
+                runner: runner.as_ref(),
+            };
             install_app(&ctx, app, &prefs, file.as_deref(), yes)
         }
         Command::Remove { app, dry_run, yes } => {
@@ -117,10 +135,20 @@ fn run(cli: Cli) -> Result<()> {
                 let (index, _) = load().ok()?;
                 state.get(&index.find(&app).ok()?.id)
             });
-            let Some(installed) = found else { bail!("{app:?} was not installed by Whistle") };
+            let Some(installed) = found else {
+                bail!("{app:?} was not installed by Whistle")
+            };
             let runner = runner(dry_run);
-            let ctx = Ctx { host: &host, paths: &paths, runner: runner.as_ref() };
-            println!("Remove {} ({})", installed.app_name, installed.how.describe());
+            let ctx = Ctx {
+                host: &host,
+                paths: &paths,
+                runner: runner.as_ref(),
+            };
+            println!(
+                "Remove {} ({})",
+                installed.app_name,
+                installed.how.describe()
+            );
             if !dry_run && !confirm(yes)? {
                 return Ok(());
             }
@@ -154,7 +182,11 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn runner(dry_run: bool) -> Box<dyn Runner> {
-    if dry_run { Box::new(DryRunner::printing()) } else { Box::new(RealRunner) }
+    if dry_run {
+        Box::new(DryRunner::printing())
+    } else {
+        Box::new(RealRunner)
+    }
 }
 
 fn search(index: &Index, host: &Host, query: &str) -> Result<()> {
@@ -165,7 +197,13 @@ fn search(index: &Index, host: &Host, query: &str) -> Result<()> {
     for app in hits {
         let cands = resolve(app, host, &Prefs::default());
         let how = best(&cands).map_or("unavailable".to_owned(), |c| c.method().to_owned());
-        println!("{:<20} {:<40} {:<14} {}", app.name, app.id, format!("[{how}]"), app.summary);
+        println!(
+            "{:<20} {:<40} {:<14} {}",
+            app.name,
+            app.id,
+            format!("[{how}]"),
+            app.summary
+        );
     }
     Ok(())
 }
@@ -192,14 +230,28 @@ fn info(app: &App, host: &Host, prefs: &Prefs) -> Result<()> {
     Ok(())
 }
 
-fn install_app(ctx: &Ctx, app: &App, prefs: &Prefs, file: Option<&std::path::Path>, yes: bool) -> Result<()> {
+fn install_app(
+    ctx: &Ctx,
+    app: &App,
+    prefs: &Prefs,
+    file: Option<&std::path::Path>,
+    yes: bool,
+) -> Result<()> {
     let dry = ctx.runner.is_dry();
     if !dry && let Some(existing) = State::load(&ctx.paths.state_file())?.get(&app.id) {
-        bail!("{} is already installed ({}); remove it first", app.name, existing.how.describe());
+        bail!(
+            "{} is already installed ({}); remove it first",
+            app.name,
+            existing.how.describe()
+        );
     }
     let cands = resolve(app, ctx.host, prefs);
     let Some(chosen) = best(&cands) else {
-        let mut msg = format!("no usable way to install {} on {}", app.name, ctx.host.describe());
+        let mut msg = format!(
+            "no usable way to install {} on {}",
+            app.name,
+            ctx.host.describe()
+        );
         for c in &cands {
             msg.push_str(&format!("\n  {c}: {}", c.blocker.as_deref().unwrap_or("")));
         }
@@ -227,7 +279,10 @@ fn confirm(yes: bool) -> Result<bool> {
     print!("Proceed? [Y/n] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer).context("reading the answer")?;
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("reading the answer")?;
     let ok = matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes");
     if !ok {
         println!("Cancelled.");
@@ -242,8 +297,15 @@ fn doctor(host: &Host, paths: &Paths, index: Result<(Index, IndexOrigin)>) -> Re
     if host.in_wsl {
         println!("            running inside WSL");
     }
-    let (found, missing): (Vec<Tool>, Vec<Tool>) = Tool::ALL.into_iter().partition(|t| host.has(*t));
-    let names = |tools: &[Tool]| tools.iter().map(|t| t.binary()).collect::<Vec<_>>().join(", ");
+    let (found, missing): (Vec<Tool>, Vec<Tool>) =
+        Tool::ALL.into_iter().partition(|t| host.has(*t));
+    let names = |tools: &[Tool]| {
+        tools
+            .iter()
+            .map(|t| t.binary())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     println!("Tools:      {}", names(&found));
     println!("Missing:    {}", names(&missing));
     match index {

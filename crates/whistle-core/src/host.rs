@@ -80,7 +80,10 @@ impl Host {
         let os_release = std::fs::read_to_string("/etc/os-release")
             .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
             .ok();
-        let tools = Tool::ALL.into_iter().filter(|t| which::which(t.binary()).is_ok()).collect();
+        let tools = Tool::ALL
+            .into_iter()
+            .filter(|t| which::which(t.binary()).is_ok())
+            .collect();
         let mut host = Self::from_parts(os, os_release.as_deref(), std::env::consts::ARCH, tools);
         if os == Os::Linux {
             host.in_wsl = std::fs::read_to_string("/proc/sys/kernel/osrelease")
@@ -102,7 +105,10 @@ impl Host {
         Self {
             os,
             distro: get("ID"),
-            distro_like: get("ID_LIKE").split_whitespace().map(str::to_owned).collect(),
+            distro_like: get("ID_LIKE")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
             distro_version: get("VERSION_ID"),
             pretty_name: get("PRETTY_NAME"),
             arch: arch.to_owned(),
@@ -125,7 +131,11 @@ impl Host {
             Os::Linux => {
                 let mut tags = vec!["linux".to_owned()];
                 for id in std::iter::once(&self.distro).chain(&self.distro_like) {
-                    let id = if id.starts_with("opensuse") || id == "suse" { "opensuse" } else { id.as_str() };
+                    let id = if id.starts_with("opensuse") || id == "suse" {
+                        "opensuse"
+                    } else {
+                        id.as_str()
+                    };
                     let tag = format!("linux:{id}");
                     if !id.is_empty() && !tags.contains(&tag) {
                         tags.push(tag);
@@ -169,7 +179,10 @@ pub fn parse_os_release(text: &str) -> HashMap<String, String> {
                 .and_then(|v| v.strip_suffix('"'))
                 .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                 .unwrap_or(v);
-            (k.trim().to_owned(), unquoted.replace("\\\"", "\"").replace("\\\\", "\\"))
+            (
+                k.trim().to_owned(),
+                unquoted.replace("\\\"", "\"").replace("\\\\", "\\"),
+            )
         })
         .collect()
 }
@@ -184,15 +197,23 @@ mod tests {
 
     #[test]
     fn ubuntu_is_also_debian() {
-        let host = linux("NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n");
-        assert_eq!(host.platform_tags(), ["linux", "linux:ubuntu", "linux:debian"]);
+        let host = linux(
+            "NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n",
+        );
+        assert_eq!(
+            host.platform_tags(),
+            ["linux", "linux:ubuntu", "linux:debian"]
+        );
         assert_eq!(host.distro_version, "26.04");
         assert_eq!(host.describe(), "Ubuntu 26.04 LTS");
     }
 
     #[test]
     fn arch_derivatives_and_opensuse() {
-        assert_eq!(linux("ID=manjaro\nID_LIKE=arch\n").platform_tags(), ["linux", "linux:manjaro", "linux:arch"]);
+        assert_eq!(
+            linux("ID=manjaro\nID_LIKE=arch\n").platform_tags(),
+            ["linux", "linux:manjaro", "linux:arch"]
+        );
         assert_eq!(linux("ID=arch\n").platform_tags(), ["linux", "linux:arch"]);
         assert_eq!(
             linux("ID=\"opensuse-tumbleweed\"\nID_LIKE=\"opensuse suse\"\n").platform_tags(),

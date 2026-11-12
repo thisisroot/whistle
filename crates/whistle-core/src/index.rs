@@ -13,7 +13,8 @@ use crate::recipe::Runtime;
 pub const FORMAT: u32 = 1;
 
 /// Where whistle-server publishes the index; `$WHISTLE_INDEX_URL` overrides it.
-pub const DEFAULT_URL: &str = "https://github.com/thisisroot/whistle-server/releases/download/index/index.json";
+pub const DEFAULT_URL: &str =
+    "https://github.com/thisisroot/whistle-server/releases/download/index/index.json";
 
 /// Largest index `update` accepts.
 const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
@@ -211,14 +212,18 @@ impl Index {
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("loading index {}", path.display()))
     }
 
     pub fn parse(text: &str) -> Result<Self> {
         let index: Self = serde_json::from_str(text)?;
         if index.format != FORMAT {
-            bail!("index format {} is not supported (expected {FORMAT}); update Whistle", index.format);
+            bail!(
+                "index format {} is not supported (expected {FORMAT}); update Whistle",
+                index.format
+            );
         }
         Ok(index)
     }
@@ -255,7 +260,11 @@ impl Index {
         if let Some(app) = self.apps.iter().find(|a| a.id == query) {
             return Ok(app);
         }
-        if let Some(app) = self.apps.iter().find(|a| a.name.eq_ignore_ascii_case(query)) {
+        if let Some(app) = self
+            .apps
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(query))
+        {
             return Ok(app);
         }
         let q = query.to_lowercase();
@@ -268,7 +277,10 @@ impl Index {
             [app] => Ok(app),
             [] => bail!("no app matches {query:?}; try `whistle search`"),
             many => {
-                let names: Vec<String> = many.iter().map(|a| format!("{} ({})", a.name, a.id)).collect();
+                let names: Vec<String> = many
+                    .iter()
+                    .map(|a| format!("{} ({})", a.name, a.id))
+                    .collect();
                 bail!("{query:?} matches several apps: {}", names.join(", "))
             }
         }
@@ -290,7 +302,10 @@ mod tests {
         let index = Index::builtin();
         assert_eq!(index.find("org.mozilla.firefox").unwrap().name, "Firefox");
         assert_eq!(index.find("firefox").unwrap().id, "org.mozilla.firefox");
-        assert_eq!(index.find("notepad").unwrap().id, "org.notepad-plus-plus.NotepadPlusPlus");
+        assert_eq!(
+            index.find("notepad").unwrap().id,
+            "org.notepad-plus-plus.NotepadPlusPlus"
+        );
         assert!(index.find("no-such-app").is_err());
     }
 
@@ -299,7 +314,12 @@ mod tests {
         let index = Index::builtin();
         let hits = index.search("fire");
         assert_eq!(hits[0].id, "org.mozilla.firefox");
-        assert!(index.search("office").iter().any(|a| a.id == "com.microsoft.Office"));
+        assert!(
+            index
+                .search("office")
+                .iter()
+                .any(|a| a.id == "com.microsoft.Office")
+        );
     }
 
     #[test]
@@ -308,7 +328,11 @@ mod tests {
         let paths = Paths::under(&root);
         std::fs::create_dir_all(&root).unwrap();
         let src = root.join("new.json");
-        std::fs::write(&src, r#"{"format": 1, "apps": [{"id": "org.example.A", "name": "A", "license": "MIT"}]}"#).unwrap();
+        std::fs::write(
+            &src,
+            r#"{"format": 1, "apps": [{"id": "org.example.A", "name": "A", "license": "MIT"}]}"#,
+        )
+        .unwrap();
 
         let index = Index::update(src.to_str().unwrap(), &paths).unwrap();
         assert_eq!(index.apps[0].license, "MIT");
@@ -318,7 +342,11 @@ mod tests {
 
         std::fs::write(&src, "not json").unwrap();
         assert!(Index::update(src.to_str().unwrap(), &paths).is_err());
-        assert_eq!(Index::load(None, &paths).unwrap().0.apps.len(), 1, "a bad index must not replace a good one");
+        assert_eq!(
+            Index::load(None, &paths).unwrap().0.apps.len(),
+            1,
+            "a bad index must not replace a good one"
+        );
         assert!(Index::update("http://example.org/index.json", &paths).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -44,7 +44,12 @@ impl How {
         match self {
             Self::Package { kind, reference } => format!("{kind}: {reference}"),
             Self::Appimage { path, .. } => format!("appimage: {}", path.display()),
-            Self::Recipe { recipe_id, revision, runtime, .. } => format!("{runtime}: {recipe_id} (rev {revision})"),
+            Self::Recipe {
+                recipe_id,
+                revision,
+                runtime,
+                ..
+            } => format!("{runtime}: {recipe_id} (rev {revision})"),
         }
     }
 }
@@ -59,7 +64,9 @@ impl State {
     /// A missing file is an empty state.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).with_context(|| format!("reading {}", path.display())),
+            Ok(text) => {
+                serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -81,13 +88,18 @@ impl State {
 
     /// By id, or by name ignoring case.
     pub fn find(&self, query: &str) -> Option<&Installed> {
-        self.get(query).or_else(|| self.installed.iter().find(|i| i.app_name.eq_ignore_ascii_case(query)))
+        self.get(query).or_else(|| {
+            self.installed
+                .iter()
+                .find(|i| i.app_name.eq_ignore_ascii_case(query))
+        })
     }
 
     pub fn record(&mut self, entry: Installed) {
         self.forget(&entry.app_id.clone());
         self.installed.push(entry);
-        self.installed.sort_by(|a, b| a.app_name.to_lowercase().cmp(&b.app_name.to_lowercase()));
+        self.installed
+            .sort_by(|a, b| a.app_name.to_lowercase().cmp(&b.app_name.to_lowercase()));
     }
 
     pub fn forget(&mut self, app_id: &str) {
@@ -110,14 +122,20 @@ mod tests {
             app_id: "org.mozilla.firefox".into(),
             app_name: "Firefox".into(),
             installed_at: 1,
-            how: How::Package { kind: SourceKind::Apt, reference: "firefox".into() },
+            how: How::Package {
+                kind: SourceKind::Apt,
+                reference: "firefox".into(),
+            },
         });
         state.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#""via": "package""#) && text.contains(r#""ref": "firefox""#));
 
         let mut loaded = State::load(&path).unwrap();
-        assert_eq!(loaded.find("firefox").unwrap().how.describe(), "apt: firefox");
+        assert_eq!(
+            loaded.find("firefox").unwrap().how.describe(),
+            "apt: firefox"
+        );
         loaded.forget("org.mozilla.firefox");
         assert!(loaded.installed.is_empty());
         std::fs::remove_dir_all(dir).unwrap();

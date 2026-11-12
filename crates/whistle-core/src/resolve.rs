@@ -39,7 +39,9 @@ impl FromStr for Via {
             "proton" => Ok(Self::Recipe(Runtime::Proton)),
             "wsl" => Ok(Self::Recipe(Runtime::Wsl)),
             "vm" => Ok(Self::Recipe(Runtime::Vm)),
-            _ => bail!("unknown method {s:?}; use native, pacman, apt, dnf, zypper, flatpak, appimage, winget, wine, proton, wsl or vm"),
+            _ => bail!(
+                "unknown method {s:?}; use native, pacman, apt, dnf, zypper, flatpak, appimage, winget, wine, proton, wsl or vm"
+            ),
         }
     }
 }
@@ -53,7 +55,10 @@ pub struct Prefs {
 #[derive(Debug, Clone)]
 pub enum Target<'a> {
     Source(&'a Source),
-    Recipe { entry: &'a RecipeEntry, recipe: Option<Box<Recipe>> },
+    Recipe {
+        entry: &'a RecipeEntry,
+        recipe: Option<Box<Recipe>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -105,7 +110,8 @@ pub fn resolve<'a>(app: &'a App, host: &Host, prefs: &Prefs) -> Vec<Candidate<'a
         .map(|s| s.kind)
         .collect();
     let relevant = |s: &&Source| {
-        host.matches_platforms(&s.platforms) && (!exact_kinds.contains(&s.kind) || s.platforms.contains(&exact))
+        host.matches_platforms(&s.platforms)
+            && (!exact_kinds.contains(&s.kind) || s.platforms.contains(&exact))
     };
 
     for source in app.sources.iter().filter(relevant) {
@@ -121,10 +127,18 @@ pub fn resolve<'a>(app: &'a App, host: &Host, prefs: &Prefs) -> Vec<Candidate<'a
         // A package listed for this exact distro beats one listed for its parent.
         let fallback = u8::from(source.kind.is_native() && !source.platforms.contains(&exact));
         let blocker = source_blocker(source, host);
-        out.push(Candidate { target: Target::Source(source), blocker, rank: (tier, fallback) });
+        out.push(Candidate {
+            target: Target::Source(source),
+            blocker,
+            rank: (tier, fallback),
+        });
     }
 
-    for entry in app.recipes.iter().filter(|r| r.status != RecipeStatus::Retired) {
+    for entry in app
+        .recipes
+        .iter()
+        .filter(|r| r.status != RecipeStatus::Retired)
+    {
         let tier = match (entry.runtime, host.os) {
             (Runtime::Wine, Os::Linux) => 5,
             (Runtime::Proton, Os::Linux) => 6,
@@ -138,7 +152,10 @@ pub fn resolve<'a>(app: &'a App, host: &Host, prefs: &Prefs) -> Vec<Candidate<'a
             Ok(recipe) => recipe_blocker(entry, recipe, host, prefs),
         };
         out.push(Candidate {
-            target: Target::Recipe { entry, recipe: parsed.ok().map(Box::new) },
+            target: Target::Recipe {
+                entry,
+                recipe: parsed.ok().map(Box::new),
+            },
             blocker,
             rank: (tier, entry.status as u8),
         });
@@ -164,12 +181,15 @@ pub fn best<'c, 'a>(candidates: &'c [Candidate<'a>]) -> Option<&'c Candidate<'a>
 
 fn source_blocker(source: &Source, host: &Host) -> Option<String> {
     if !host.matches_arch(&source.arches) {
-        return Some(format!("built for {}, this machine is {}", source.arches.join("/"), host.arch));
+        return Some(format!(
+            "built for {}, this machine is {}",
+            source.arches.join("/"),
+            host.arch
+        ));
     }
     match source.kind {
-        SourceKind::Appimage => {
-            (source.url.is_empty() || source.sha256.is_empty()).then(|| "catalog entry has no pinned download".into())
-        }
+        SourceKind::Appimage => (source.url.is_empty() || source.sha256.is_empty())
+            .then(|| "catalog entry has no pinned download".into()),
         SourceKind::VendorInstaller | SourceKind::Wsl => Some("not supported yet".into()),
         kind => {
             let tool = backend::tool_for(kind)?;
@@ -184,16 +204,28 @@ fn source_blocker(source: &Source, host: &Host) -> Option<String> {
     }
 }
 
-fn recipe_blocker(entry: &RecipeEntry, recipe: &Recipe, host: &Host, prefs: &Prefs) -> Option<String> {
+fn recipe_blocker(
+    entry: &RecipeEntry,
+    recipe: &Recipe,
+    host: &Host,
+    prefs: &Prefs,
+) -> Option<String> {
     if entry.status == RecipeStatus::Draft && !prefs.allow_draft {
         return Some("draft recipe; pass --allow-draft to try it".into());
     }
-    let needs_winetricks = recipe.steps.iter().any(|s| matches!(s, Step::Winetricks(_)));
+    let needs_winetricks = recipe
+        .steps
+        .iter()
+        .any(|s| matches!(s, Step::Winetricks(_)));
     match entry.runtime {
         Runtime::Wine if !host.has(Tool::Wine) => Some("wine is not installed".into()),
-        Runtime::Wine if needs_winetricks && !host.has(Tool::Winetricks) => Some("winetricks is not installed".into()),
+        Runtime::Wine if needs_winetricks && !host.has(Tool::Winetricks) => {
+            Some("winetricks is not installed".into())
+        }
         Runtime::Wine => None,
-        Runtime::Proton | Runtime::Wsl | Runtime::Vm => Some(format!("{} recipes are not supported yet", entry.runtime)),
+        Runtime::Proton | Runtime::Wsl | Runtime::Vm => {
+            Some(format!("{} recipes are not supported yet", entry.runtime))
+        }
     }
 }
 
@@ -204,18 +236,29 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn host(os_release: &str, tools: &[Tool]) -> Host {
-        Host::from_parts(Os::Linux, Some(os_release), "x86_64", tools.iter().copied().collect::<BTreeSet<_>>())
+        Host::from_parts(
+            Os::Linux,
+            Some(os_release),
+            "x86_64",
+            tools.iter().copied().collect::<BTreeSet<_>>(),
+        )
     }
 
     fn methods(cands: &[Candidate]) -> Vec<String> {
-        cands.iter().map(|c| format!("{}{}", c.method(), if c.available() { "" } else { "!" })).collect()
+        cands
+            .iter()
+            .map(|c| format!("{}{}", c.method(), if c.available() { "" } else { "!" }))
+            .collect()
     }
 
     #[test]
     fn native_first_then_flatpak() {
         let index = Index::builtin();
         let app = index.find("firefox").unwrap();
-        let ubuntu = host("ID=ubuntu\nID_LIKE=debian\n", &[Tool::AptGet, Tool::Flatpak, Tool::Sudo]);
+        let ubuntu = host(
+            "ID=ubuntu\nID_LIKE=debian\n",
+            &[Tool::AptGet, Tool::Flatpak, Tool::Sudo],
+        );
         let cands = resolve(app, &ubuntu, &Prefs::default());
         assert_eq!(methods(&cands), ["apt", "flatpak"]);
         assert_eq!(best(&cands).unwrap().to_string(), "apt: firefox");
@@ -239,7 +282,10 @@ mod tests {
         let cands = resolve(app, &fedora, &Prefs::default());
         assert_eq!(methods(&cands), ["wine"]);
         let no_wine = host("ID=fedora\n", &[Tool::Dnf]);
-        assert_eq!(methods(&resolve(app, &no_wine, &Prefs::default())), ["wine!"]);
+        assert_eq!(
+            methods(&resolve(app, &no_wine, &Prefs::default())),
+            ["wine!"]
+        );
     }
 
     #[test]
@@ -248,8 +294,14 @@ mod tests {
         let office = index.find("com.microsoft.Office").unwrap();
         let h = host("ID=arch\n", &[Tool::Wine]);
         assert!(best(&resolve(office, &h, &Prefs::default())).is_none());
-        let prefs = Prefs { allow_draft: true, ..Prefs::default() };
-        assert_eq!(resolve(office, &h, &prefs)[0].blocker.as_deref(), Some("winetricks is not installed"));
+        let prefs = Prefs {
+            allow_draft: true,
+            ..Prefs::default()
+        };
+        assert_eq!(
+            resolve(office, &h, &prefs)[0].blocker.as_deref(),
+            Some("winetricks is not installed")
+        );
         let h = host("ID=arch\n", &[Tool::Wine, Tool::Winetricks]);
         assert!(best(&resolve(office, &h, &prefs)).is_some());
     }
@@ -258,19 +310,30 @@ mod tests {
     fn via_forces_a_method() {
         let index = Index::builtin();
         let app = index.find("gimp").unwrap();
-        let h = host("ID=ubuntu\nID_LIKE=debian\n", &[Tool::AptGet, Tool::Flatpak, Tool::Sudo]);
-        let prefs = Prefs { via: Some("flatpak".parse().unwrap()), ..Prefs::default() };
+        let h = host(
+            "ID=ubuntu\nID_LIKE=debian\n",
+            &[Tool::AptGet, Tool::Flatpak, Tool::Sudo],
+        );
+        let prefs = Prefs {
+            via: Some("flatpak".parse().unwrap()),
+            ..Prefs::default()
+        };
         assert_eq!(methods(&resolve(app, &h, &prefs)), ["flatpak"]);
-        let prefs = Prefs { via: Some(Via::Native), ..Prefs::default() };
+        let prefs = Prefs {
+            via: Some(Via::Native),
+            ..Prefs::default()
+        };
         assert_eq!(methods(&resolve(app, &h, &prefs)), ["apt"]);
     }
 
     #[test]
     fn exact_distro_package_beats_parent_distro() {
-        let index = Index::parse(r#"{"format": 1, "apps": [{"id": "org.example.A", "name": "A", "sources": [
+        let index = Index::parse(
+            r#"{"format": 1, "apps": [{"id": "org.example.A", "name": "A", "sources": [
             {"kind": "apt", "ref": "a-debian", "platforms": ["linux:debian"]},
             {"kind": "apt", "ref": "a-ubuntu", "platforms": ["linux:ubuntu"]}
-        ]}]}"#)
+        ]}]}"#,
+        )
         .unwrap();
         let app = &index.apps[0];
         let ubuntu = host("ID=ubuntu\nID_LIKE=debian\n", &[Tool::AptGet, Tool::Sudo]);
@@ -278,7 +341,12 @@ mod tests {
         assert_eq!(cands.len(), 1, "Debian's name is dropped on Ubuntu");
         assert_eq!(cands[0].to_string(), "apt: a-ubuntu");
         let debian = host("ID=debian\n", &[Tool::AptGet, Tool::Sudo]);
-        assert_eq!(best(&resolve(app, &debian, &Prefs::default())).unwrap().to_string(), "apt: a-debian");
+        assert_eq!(
+            best(&resolve(app, &debian, &Prefs::default()))
+                .unwrap()
+                .to_string(),
+            "apt: a-debian"
+        );
     }
 
     #[test]
@@ -288,6 +356,9 @@ mod tests {
         let linux = host("ID=arch\n", &[Tool::Pacman, Tool::Sudo]);
         assert!(!methods(&resolve(app, &linux, &Prefs::default())).contains(&"wsl!".to_owned()));
         let windows = Host::from_parts(Os::Windows, None, "x86_64", BTreeSet::new());
-        assert_eq!(methods(&resolve(app, &windows, &Prefs::default())), ["wsl!"]);
+        assert_eq!(
+            methods(&resolve(app, &windows, &Prefs::default())),
+            ["wsl!"]
+        );
     }
 }

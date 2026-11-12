@@ -26,9 +26,18 @@ pub fn prefix_for(paths: &Paths, recipe_id: &str) -> PathBuf {
     paths.prefixes().join(recipe_id)
 }
 
-pub fn install(recipe: &Recipe, paths: &Paths, runner: &dyn Runner, user_file: Option<&Path>) -> Result<WineInstall> {
+pub fn install(
+    recipe: &Recipe,
+    paths: &Paths,
+    runner: &dyn Runner,
+    user_file: Option<&Path>,
+) -> Result<WineInstall> {
     if recipe.runtime != Runtime::Wine {
-        bail!("{} is a {} recipe, not a Wine one", recipe.id, recipe.runtime);
+        bail!(
+            "{} is a {} recipe, not a Wine one",
+            recipe.id,
+            recipe.runtime
+        );
     }
     recipe.check()?;
     let media = acquire(recipe, paths, runner, user_file)?;
@@ -67,8 +76,12 @@ pub fn install(recipe: &Recipe, paths: &Paths, runner: &dyn Runner, user_file: O
                 let mut reg = format!("[{}]\r\n", reg_root(&step.key)?);
                 for (name, value) in &step.value {
                     match value {
-                        RegValue::Dword(d) => writeln!(reg, "\"{}\"=dword:{d:08x}\r", reg_escape(name))?,
-                        RegValue::String(s) => writeln!(reg, "\"{}\"=\"{}\"\r", reg_escape(name), reg_escape(s))?,
+                        RegValue::Dword(d) => {
+                            writeln!(reg, "\"{}\"=dword:{d:08x}\r", reg_escape(name))?
+                        }
+                        RegValue::String(s) => {
+                            writeln!(reg, "\"{}\"=\"{}\"\r", reg_escape(name), reg_escape(s))?
+                        }
                     }
                 }
                 apply_reg(runner, &prefix, n, &reg, &env)?;
@@ -105,41 +118,76 @@ pub fn install(recipe: &Recipe, paths: &Paths, runner: &dyn Runner, user_file: O
 
     // Let the installer's background processes finish before touching the prefix.
     if let Some(server) = wineserver() {
-        let _ = runner.run(&Cmd::new(server.display().to_string()).arg("-w").envs(&env).timeout(Duration::from_secs(120)));
+        let _ = runner.run(
+            &Cmd::new(server.display().to_string())
+                .arg("-w")
+                .envs(&env)
+                .timeout(Duration::from_secs(120)),
+        );
     }
     // Done last, so the recipe's steps and installer could still replace any DLL.
     match wine_dir() {
-        Some(dir) if runner.is_dry() => runner.note(&format!("link Wine's own DLLs from {} into the prefix", dir.display())),
+        Some(dir) if runner.is_dry() => runner.note(&format!(
+            "link Wine's own DLLs from {} into the prefix",
+            dir.display()
+        )),
         Some(dir) => {
             let saved = link_builtin_dlls(&prefix, &dir)?;
-            runner.note(&format!("shared {} MB of Wine DLLs instead of copying them", saved / (1024 * 1024)));
+            runner.note(&format!(
+                "shared {} MB of Wine DLLs instead of copying them",
+                saved / (1024 * 1024)
+            ));
         }
         None => runner.note("Wine's install directory not found; keeping the prefix's DLL copies"),
     }
 
     let mut desktop_files = Vec::new();
     for launcher in &recipe.launchers {
-        let path = paths.applications.join(desktop_file_name(&recipe.id, &launcher.name));
-        write_file(runner, &path, &desktop_entry(&recipe.id, launcher, &prefix, &launcher_env))?;
+        let path = paths
+            .applications
+            .join(desktop_file_name(&recipe.id, &launcher.name));
+        write_file(
+            runner,
+            &path,
+            &desktop_entry(&recipe.id, launcher, &prefix, &launcher_env),
+        )?;
         desktop_files.push(path);
     }
     if recipe.health_check.is_some() {
         runner.note("skip the health check (not implemented yet)");
     }
-    Ok(WineInstall { prefix, desktop_files })
+    Ok(WineInstall {
+        prefix,
+        desktop_files,
+    })
 }
 
 /// Stop the prefix's wineserver and delete the prefix and its menu entries.
-pub fn uninstall(paths: &Paths, prefix: &Path, desktop_files: &[PathBuf], runner: &dyn Runner) -> Result<()> {
+pub fn uninstall(
+    paths: &Paths,
+    prefix: &Path,
+    desktop_files: &[PathBuf],
+    runner: &dyn Runner,
+) -> Result<()> {
     // Only ever delete inside our own prefixes dir, whatever the state file says.
-    let escapes = prefix.components().any(|c| matches!(c, std::path::Component::ParentDir));
+    let escapes = prefix
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
     if escapes || !prefix.starts_with(paths.prefixes()) || prefix == paths.prefixes() {
-        bail!("refusing to delete {}: not a Whistle prefix", prefix.display());
+        bail!(
+            "refusing to delete {}: not a Whistle prefix",
+            prefix.display()
+        );
     }
     let env = [("WINEPREFIX".to_owned(), prefix.display().to_string())];
     if let Some(server) = wineserver() {
         let _ = runner.run(&Cmd::new(server.display().to_string()).arg("-k").envs(&env));
-        let _ = runner.run(&Cmd::new(server.display().to_string()).arg("-w").envs(&env).timeout(Duration::from_secs(30)));
+        let _ = runner.run(
+            &Cmd::new(server.display().to_string())
+                .arg("-w")
+                .envs(&env)
+                .timeout(Duration::from_secs(30)),
+        );
     }
     for file in desktop_files {
         remove_path(runner, file)?;
@@ -150,20 +198,35 @@ pub fn uninstall(paths: &Paths, prefix: &Path, desktop_files: &[PathBuf], runner
 /// Where Wine keeps its own Windows DLLs (`x86_64-windows`, `i386-windows`) and `wineserver`.
 pub fn wine_dir() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(root) = which::which("wine").ok().and_then(|w| w.canonicalize().ok()).and_then(|w| Some(w.parent()?.parent()?.to_owned())) {
+    if let Some(root) = which::which("wine")
+        .ok()
+        .and_then(|w| w.canonicalize().ok())
+        .and_then(|w| Some(w.parent()?.parent()?.to_owned()))
+    {
         for rel in ["lib/wine", "lib64/wine", "lib/x86_64-linux-gnu/wine"] {
             candidates.push(root.join(rel));
         }
     }
-    candidates.extend(["/usr/lib/x86_64-linux-gnu/wine", "/usr/lib/wine", "/usr/lib64/wine"].map(PathBuf::from));
-    candidates.into_iter().find(|d| d.join("x86_64-windows").is_dir())
+    candidates.extend(
+        [
+            "/usr/lib/x86_64-linux-gnu/wine",
+            "/usr/lib/wine",
+            "/usr/lib64/wine",
+        ]
+        .map(PathBuf::from),
+    );
+    candidates
+        .into_iter()
+        .find(|d| d.join("x86_64-windows").is_dir())
 }
 
 /// `wineserver` is often not on PATH (Debian and Ubuntu keep it in the Wine dir).
 pub fn wineserver() -> Option<PathBuf> {
-    which::which("wineserver")
-        .ok()
-        .or_else(|| wine_dir().map(|d| d.join("wineserver")).filter(|p| p.is_file()))
+    which::which("wineserver").ok().or_else(|| {
+        wine_dir()
+            .map(|d| d.join("wineserver"))
+            .filter(|p| p.is_file())
+    })
 }
 
 /// Replace the prefix's copies of Wine's own DLLs with symlinks to them.
@@ -178,7 +241,9 @@ pub fn link_builtin_dlls(prefix: &Path, wine_dir: &Path) -> Result<u64> {
     for (sub, arch) in [("system32", "x86_64-windows"), ("syswow64", "i386-windows")] {
         let base = prefix.join("drive_c/windows").join(sub);
         for dir in [base.clone(), base.join("drivers")] {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries {
                 let entry = entry?;
                 if !entry.file_type()?.is_file() {
@@ -186,7 +251,8 @@ pub fn link_builtin_dlls(prefix: &Path, wine_dir: &Path) -> Result<u64> {
                 }
                 let target = wine_dir.join(arch).join(entry.file_name());
                 let len = entry.metadata()?.len();
-                let matches = std::fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == len);
+                let matches =
+                    std::fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() == len);
                 if !matches || is_writable(&target) || !same_content(&entry.path(), &target)? {
                     continue;
                 }
@@ -194,7 +260,8 @@ pub fn link_builtin_dlls(prefix: &Path, wine_dir: &Path) -> Result<u64> {
                 let tmp = path.with_extension("whistle-link");
                 let _ = std::fs::remove_file(&tmp);
                 symlink(&target, &tmp)?;
-                std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+                std::fs::rename(&tmp, &path)
+                    .with_context(|| format!("replacing {}", path.display()))?;
                 saved += len;
             }
         }
@@ -214,7 +281,8 @@ fn same_content(a: &Path, b: &Path) -> Result<bool> {
         if n == 0 {
             return Ok(fb.read(&mut bb[..1])? == 0);
         }
-        fb.read_exact(&mut bb[..n]).map_err(|_| anyhow::anyhow!("short read"))?;
+        fb.read_exact(&mut bb[..n])
+            .map_err(|_| anyhow::anyhow!("short read"))?;
         if ba[..n] != bb[..n] {
             return Ok(false);
         }
@@ -228,13 +296,25 @@ fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "symlinks need a Unix host"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks need a Unix host",
+    ))
 }
 
 /// Get the installer onto disk and prove it is the expected file.
-fn acquire(recipe: &Recipe, paths: &Paths, runner: &dyn Runner, user_file: Option<&Path>) -> Result<PathBuf> {
+fn acquire(
+    recipe: &Recipe,
+    paths: &Paths,
+    runner: &dyn Runner,
+    user_file: Option<&Path>,
+) -> Result<PathBuf> {
     match &recipe.installer {
-        Installer::Download { url, sha256, file_name } => {
+        Installer::Download {
+            url,
+            sha256,
+            file_name,
+        } => {
             let name = fetch::file_name_for(url, file_name.as_deref())?;
             let dir = paths.downloads().join(&recipe.id);
             if runner.is_dry() {
@@ -243,22 +323,41 @@ fn acquire(recipe: &Recipe, paths: &Paths, runner: &dyn Runner, user_file: Optio
             }
             fetch::download_verified(url, sha256, &dir, &name)
         }
-        Installer::UserSupplied { prompt, sha256_any, file_name_hint } => {
+        Installer::UserSupplied {
+            prompt,
+            sha256_any,
+            file_name_hint,
+        } => {
             let Some(file) = user_file else {
-                let hint = file_name_hint.as_deref().map(|h| format!(" (usually {h})")).unwrap_or_default();
+                let hint = file_name_hint
+                    .as_deref()
+                    .map(|h| format!(" (usually {h})"))
+                    .unwrap_or_default();
                 bail!("{prompt}{hint}, and pass it with --file <path>");
             };
             fetch::verify(file, sha256_any)?;
-            file.canonicalize().with_context(|| format!("resolving {}", file.display()))
+            file.canonicalize()
+                .with_context(|| format!("resolving {}", file.display()))
         }
         Installer::Package { .. } => bail!("package installers only apply to WSL recipes"),
     }
 }
 
-fn apply_reg(runner: &dyn Runner, prefix: &Path, step: usize, body: &str, env: &[(String, String)]) -> Result<()> {
+fn apply_reg(
+    runner: &dyn Runner,
+    prefix: &Path,
+    step: usize,
+    body: &str,
+    env: &[(String, String)],
+) -> Result<()> {
     let file = prefix.join("whistle").join(format!("step-{step}.reg"));
     write_file(runner, &file, &format!("REGEDIT4\r\n\r\n{body}"))?;
-    runner.run(&Cmd::new("wine").args(["regedit", "/S"]).arg(file.display().to_string()).envs(env))
+    runner.run(
+        &Cmd::new("wine")
+            .args(["regedit", "/S"])
+            .arg(file.display().to_string())
+            .envs(env),
+    )
 }
 
 fn reg_escape(s: &str) -> String {
@@ -285,10 +384,16 @@ fn media_path(media: &Path, relative: &str) -> Result<PathBuf> {
     if media.is_dir() {
         return Ok(media.join(relative));
     }
-    if media.file_name().is_some_and(|n| n.to_string_lossy() == relative) {
+    if media
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy() == relative)
+    {
         return Ok(media.to_owned());
     }
-    bail!("copy: {relative:?} is not part of the installer media {}", media.display())
+    bail!(
+        "copy: {relative:?} is not part of the installer media {}",
+        media.display()
+    )
 }
 
 fn copy_recursive(from: &Path, to: &Path) -> Result<()> {
@@ -302,7 +407,8 @@ fn copy_recursive(from: &Path, to: &Path) -> Result<()> {
         if let Some(dir) = to.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::copy(from, to).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+        std::fs::copy(from, to)
+            .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
     }
     Ok(())
 }
@@ -310,19 +416,34 @@ fn copy_recursive(from: &Path, to: &Path) -> Result<()> {
 pub fn desktop_file_name(recipe_id: &str, launcher: &str) -> String {
     let slug: String = launcher
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("whistle-{recipe_id}-{}.desktop", slug.trim_matches('-'))
 }
 
 /// A freedesktop menu entry that starts the launcher in its prefix.
-pub fn desktop_entry(recipe_id: &str, launcher: &Launcher, prefix: &Path, env: &[(String, String)]) -> String {
+pub fn desktop_entry(
+    recipe_id: &str,
+    launcher: &Launcher,
+    prefix: &Path,
+    env: &[(String, String)],
+) -> String {
     let mut argv = vec!["env".to_owned(), format!("WINEPREFIX={}", prefix.display())];
     argv.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
     argv.push("wine".to_owned());
     argv.push(launcher.exe.clone());
     argv.extend(launcher.args.iter().cloned());
-    let mut exec = argv.iter().map(|a| desktop_quote(a)).collect::<Vec<_>>().join(" ");
+    let mut exec = argv
+        .iter()
+        .map(|a| desktop_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
     if !launcher.mime.is_empty() {
         exec.push_str(" %f");
     }
@@ -333,7 +454,15 @@ pub fn desktop_entry(recipe_id: &str, launcher: &Launcher, prefix: &Path, env: &
     let _ = writeln!(out, "Comment=Runs with Wine, installed by Whistle");
     // The Exec value is a string first (backslashes escaped), then a command line.
     let _ = writeln!(out, "Exec={}", exec.replace('\\', "\\\\"));
-    let _ = writeln!(out, "Icon={}", launcher.icon.as_deref().map(one_line).unwrap_or_else(|| "wine".into()));
+    let _ = writeln!(
+        out,
+        "Icon={}",
+        launcher
+            .icon
+            .as_deref()
+            .map(one_line)
+            .unwrap_or_else(|| "wine".into())
+    );
     if !launcher.categories.is_empty() {
         let _ = writeln!(out, "Categories={};", launcher.categories.join(";"));
     }
@@ -346,7 +475,10 @@ pub fn desktop_entry(recipe_id: &str, launcher: &Launcher, prefix: &Path, env: &
 
 /// Quote one argument per the Desktop Entry spec's Exec rules.
 fn desktop_quote(arg: &str) -> String {
-    const RESERVED: &[char] = &[' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(', ')', '`'];
+    const RESERVED: &[char] = &[
+        ' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(',
+        ')', '`',
+    ];
     let arg = arg.replace('%', "%%");
     if arg.is_empty() || arg.contains(RESERVED) {
         let mut quoted = String::from("\"");
@@ -387,7 +519,11 @@ pub(crate) fn remove_path(runner: &dyn Runner, path: &Path) -> Result<()> {
         runner.note(&format!("delete {}", path.display()));
         return Ok(());
     }
-    let result = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
     match result {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             Err(e).with_context(|| format!("deleting {}", path.display()))
@@ -436,11 +572,25 @@ mod tests {
         let paths = Paths::under(Path::new("/w"));
         let runner = DryRunner::default();
         let result = install(&recipe("notepad"), &paths, &runner, None).unwrap();
-        assert_eq!(result.prefix, Path::new("/w/data/prefixes/org.notepad-plus-plus.NotepadPlusPlus"));
+        assert_eq!(
+            result.prefix,
+            Path::new("/w/data/prefixes/org.notepad-plus-plus.NotepadPlusPlus")
+        );
         let cmds = runner.commands();
-        assert!(cmds[0].starts_with("WINEPREFIX=/w/data/prefixes/") && cmds[0].ends_with("wineboot --init"));
-        assert!(cmds[1].ends_with("npp.8.9.9.Installer.x64.exe /S"), "{cmds:?}");
-        assert_eq!(result.desktop_files, [Path::new("/w/applications/whistle-org.notepad-plus-plus.NotepadPlusPlus-notepad.desktop")]);
+        assert!(
+            cmds[0].starts_with("WINEPREFIX=/w/data/prefixes/")
+                && cmds[0].ends_with("wineboot --init")
+        );
+        assert!(
+            cmds[1].ends_with("npp.8.9.9.Installer.x64.exe /S"),
+            "{cmds:?}"
+        );
+        assert_eq!(
+            result.desktop_files,
+            [Path::new(
+                "/w/applications/whistle-org.notepad-plus-plus.NotepadPlusPlus-notepad.desktop"
+            )]
+        );
     }
 
     #[test]
@@ -450,16 +600,32 @@ mod tests {
         let setup = dir.join("setup.exe");
         std::fs::write(&setup, b"abc").unwrap();
         let mut office = recipe("com.microsoft.Office");
-        let Installer::UserSupplied { sha256_any, .. } = &mut office.installer else { panic!() };
-        *sha256_any = vec!["ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()];
+        let Installer::UserSupplied { sha256_any, .. } = &mut office.installer else {
+            panic!()
+        };
+        *sha256_any =
+            vec!["ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()];
 
         let runner = DryRunner::default();
         let paths = Paths::under(&dir);
-        assert!(install(&office, &paths, &runner, None).unwrap_err().to_string().contains("--file"));
+        assert!(
+            install(&office, &paths, &runner, None)
+                .unwrap_err()
+                .to_string()
+                .contains("--file")
+        );
         install(&office, &paths, &runner, Some(&setup)).unwrap();
         let cmds = runner.commands();
-        assert!(cmds.iter().any(|c| c.ends_with("winetricks -q corefonts msxml6 riched20")));
-        assert_eq!(cmds.iter().filter(|c| c.contains("wine regedit /S")).count(), 2);
+        assert!(
+            cmds.iter()
+                .any(|c| c.ends_with("winetricks -q corefonts msxml6 riched20"))
+        );
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| c.contains("wine regedit /S"))
+                .count(),
+            2
+        );
         assert!(cmds.iter().any(|c| c.ends_with("setup.exe /quiet")));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -470,7 +636,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let setup = dir.join("setup.exe");
         std::fs::write(&setup, b"not office").unwrap();
-        let err = install(&recipe("com.microsoft.Office"), &Paths::under(&dir), &DryRunner::default(), Some(&setup));
+        let err = install(
+            &recipe("com.microsoft.Office"),
+            &Paths::under(&dir),
+            &DryRunner::default(),
+            Some(&setup),
+        );
         assert!(err.unwrap_err().to_string().contains("doesn't match"));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -491,7 +662,8 @@ mod tests {
         ] {
             std::fs::write(wine.join(name), wine_body).unwrap();
             if read_only {
-                std::fs::set_permissions(wine.join(name), std::fs::Permissions::from_mode(0o444)).unwrap();
+                std::fs::set_permissions(wine.join(name), std::fs::Permissions::from_mode(0o444))
+                    .unwrap();
             }
             std::fs::write(sys32.join(name), prefix_body).unwrap();
         }
@@ -502,11 +674,28 @@ mod tests {
         }
         let saved = link_builtin_dlls(&root.join("pfx"), &root.join("wine")).unwrap();
         assert_eq!(saved, 7);
-        assert_eq!(std::fs::read_link(sys32.join("same.dll")).unwrap(), wine.join("same.dll"));
-        assert!(std::fs::read_link(sys32.join("changed.dll")).is_err(), "a DLL the recipe replaced stays");
-        assert!(std::fs::read_link(sys32.join("writable.dll")).is_err(), "never link to a file we could write through");
-        std::fs::set_permissions(wine.join("same.dll"), std::fs::Permissions::from_mode(0o644)).unwrap();
-        std::fs::set_permissions(wine.join("changed.dll"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::read_link(sys32.join("same.dll")).unwrap(),
+            wine.join("same.dll")
+        );
+        assert!(
+            std::fs::read_link(sys32.join("changed.dll")).is_err(),
+            "a DLL the recipe replaced stays"
+        );
+        assert!(
+            std::fs::read_link(sys32.join("writable.dll")).is_err(),
+            "never link to a file we could write through"
+        );
+        std::fs::set_permissions(
+            wine.join("same.dll"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            wine.join("changed.dll"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

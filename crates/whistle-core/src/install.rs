@@ -33,12 +33,17 @@ pub fn install(ctx: &Ctx, app: &App, candidate: &Candidate, opts: &Options) -> R
         bail!("can't install {} with {candidate}: {why}", app.name);
     }
     let how = match &candidate.target {
-        Target::Source(source) if source.kind == SourceKind::Appimage => install_appimage(ctx, app, source)?,
+        Target::Source(source) if source.kind == SourceKind::Appimage => {
+            install_appimage(ctx, app, source)?
+        }
         Target::Source(source) => {
             for cmd in backend::install_cmds(source.kind, &source.reference, ctx.host)? {
                 ctx.runner.run(&cmd)?;
             }
-            How::Package { kind: source.kind, reference: source.reference.clone() }
+            How::Package {
+                kind: source.kind,
+                reference: source.reference.clone(),
+            }
         }
         Target::Recipe { entry, recipe } => {
             let recipe = recipe.as_ref().context("the recipe could not be parsed")?;
@@ -60,7 +65,10 @@ pub fn install(ctx: &Ctx, app: &App, candidate: &Candidate, opts: &Options) -> R
     let installed = Installed {
         app_id: app.id.clone(),
         app_name: app.name.clone(),
-        installed_at: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        installed_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
         how,
     };
     if !ctx.runner.is_dry() {
@@ -81,12 +89,20 @@ pub fn remove(ctx: &Ctx, installed: &Installed) -> Result<()> {
         }
         How::Appimage { path, desktop_file } => {
             if !path.starts_with(ctx.paths.appimages()) {
-                bail!("refusing to delete {}: not a Whistle AppImage", path.display());
+                bail!(
+                    "refusing to delete {}: not a Whistle AppImage",
+                    path.display()
+                );
             }
             wine::remove_path(ctx.runner, desktop_file)?;
             wine::remove_path(ctx.runner, path)?;
         }
-        How::Recipe { runtime: Runtime::Wine, prefix, desktop_files, .. } => {
+        How::Recipe {
+            runtime: Runtime::Wine,
+            prefix,
+            desktop_files,
+            ..
+        } => {
             wine::uninstall(ctx.paths, prefix, desktop_files, ctx.runner)?;
         }
         How::Recipe { runtime, .. } => bail!("{runtime} recipes are not supported yet"),
@@ -105,7 +121,10 @@ fn install_appimage(ctx: &Ctx, app: &App, source: &Source) -> Result<How> {
     let name = format!("{}.AppImage", app.id);
     let path = dir.join(&name);
     if ctx.runner.is_dry() {
-        ctx.runner.note(&format!("download {} and check its SHA-256 is {}", source.url, source.sha256));
+        ctx.runner.note(&format!(
+            "download {} and check its SHA-256 is {}",
+            source.url, source.sha256
+        ));
     } else {
         fetch::download_verified(&source.url, &source.sha256, &dir, &name)?;
         #[cfg(unix)]
@@ -114,12 +133,19 @@ fn install_appimage(ctx: &Ctx, app: &App, source: &Source) -> Result<How> {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         }
     }
-    let desktop_file = ctx.paths.applications.join(format!("whistle-{}.desktop", app.id));
+    let desktop_file = ctx
+        .paths
+        .applications
+        .join(format!("whistle-{}.desktop", app.id));
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName={}\nComment={}\nExec=\"{}\" %U\nIcon=application-x-executable\nX-Whistle-App={}\n",
         app.name.replace('\n', " "),
         app.summary.replace('\n', " "),
-        path.display().to_string().replace('\\', "\\\\\\\\").replace('"', "\\\\\"").replace('%', "%%"),
+        path.display()
+            .to_string()
+            .replace('\\', "\\\\\\\\")
+            .replace('"', "\\\\\"")
+            .replace('%', "%%"),
         app.id,
     );
     wine::write_file(ctx.runner, &desktop_file, &entry)?;
@@ -138,11 +164,20 @@ mod tests {
     fn dry_install_runs_the_package_manager_and_records_nothing() {
         let index = Index::builtin();
         let app = index.find("vlc").unwrap();
-        let host = Host::from_parts(Os::Linux, Some("ID=fedora\n"), "x86_64", [Tool::Dnf, Tool::Sudo].into());
+        let host = Host::from_parts(
+            Os::Linux,
+            Some("ID=fedora\n"),
+            "x86_64",
+            [Tool::Dnf, Tool::Sudo].into(),
+        );
         let root = std::env::temp_dir().join(format!("whistle-install-{}", std::process::id()));
         let paths = Paths::under(&root);
         let runner = DryRunner::default();
-        let ctx = Ctx { host: &host, paths: &paths, runner: &runner };
+        let ctx = Ctx {
+            host: &host,
+            paths: &paths,
+            runner: &runner,
+        };
 
         let cands = resolve(app, &host, &Prefs::default());
         let installed = install(&ctx, app, best(&cands).unwrap(), &Options::default()).unwrap();
@@ -161,7 +196,11 @@ mod tests {
         let host = Host::from_parts(Os::Linux, Some("ID=arch\n"), "x86_64", Default::default());
         let paths = Paths::under(Path::new("/w"));
         let runner = DryRunner::default();
-        let ctx = Ctx { host: &host, paths: &paths, runner: &runner };
+        let ctx = Ctx {
+            host: &host,
+            paths: &paths,
+            runner: &runner,
+        };
         let cands = resolve(app, &host, &Prefs::default());
         let err = install(&ctx, app, &cands[0], &Options::default()).unwrap_err();
         assert!(err.to_string().contains("wine is not installed"));

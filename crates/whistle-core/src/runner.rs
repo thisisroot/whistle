@@ -20,7 +20,13 @@ pub struct Cmd {
 
 impl Cmd {
     pub fn new(program: impl Into<String>) -> Self {
-        Self { program: program.into(), args: vec![], env: vec![], cwd: None, timeout: None }
+        Self {
+            program: program.into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+            timeout: None,
+        }
     }
 
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
@@ -50,19 +56,26 @@ impl Cmd {
 
     /// The argv as one line, quoted for reading (not for a shell).
     pub fn argv(&self) -> Vec<&str> {
-        std::iter::once(self.program.as_str()).chain(self.args.iter().map(String::as_str)).collect()
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .collect()
     }
 
     pub fn display(&self) -> String {
         let quote = |s: &str| {
-            if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:+,@%".contains(c)) {
+            if !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:+,@%".contains(c))
+            {
                 s.to_owned()
             } else {
                 format!("'{}'", s.replace('\'', r"'\''"))
             }
         };
         let env = self.env.iter().map(|(k, v)| format!("{k}={}", quote(v)));
-        env.chain(self.argv().into_iter().map(quote)).collect::<Vec<_>>().join(" ")
+        env.chain(self.argv().into_iter().map(quote))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -81,11 +94,15 @@ impl Runner for RealRunner {
     fn run(&self, cmd: &Cmd) -> Result<()> {
         eprintln!("+ {}", cmd.display());
         let mut command = Command::new(&cmd.program);
-        command.args(&cmd.args).envs(cmd.env.iter().map(|(k, v)| (k, v)));
+        command
+            .args(&cmd.args)
+            .envs(cmd.env.iter().map(|(k, v)| (k, v)));
         if let Some(dir) = &cmd.cwd {
             command.current_dir(dir);
         }
-        let mut child = command.spawn().with_context(|| format!("can't start {}", cmd.program))?;
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("can't start {}", cmd.program))?;
         let status = match cmd.timeout {
             None => child.wait()?,
             Some(limit) => {
@@ -128,7 +145,10 @@ pub struct DryRunner {
 
 impl DryRunner {
     pub fn printing() -> Self {
-        Self { echo: true, ..Self::default() }
+        Self {
+            echo: true,
+            ..Self::default()
+        }
     }
 
     pub fn commands(&self) -> Vec<String> {
