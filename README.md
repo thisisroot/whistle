@@ -65,14 +65,14 @@ work through `ID_LIKE` in `/etc/os-release`.
 
 ## Quick start
 
-Prebuilt binaries are coming soon. For now, build from source with Rust 1.88 or newer:
-
 ```sh
-git clone https://github.com/thisisroot/whistle.git
-cd whistle
-cargo build --release
-sudo install target/release/whistle /usr/local/bin/   # or copy it anywhere on your PATH
+curl -fsSL https://raw.githubusercontent.com/thisisroot/whistle/main/install.sh | sh
 ```
+
+This puts a single static binary in `~/.local/bin` (no root needed) and checks
+it against the release's `SHA256SUMS`. It works on x86_64 and aarch64, on any
+distro. Run it again to upgrade Whistle itself. Set `WHISTLE_VERSION=v0.1.0` to
+pin a version, or `WHISTLE_INSTALL_DIR` to put it somewhere else.
 
 Then:
 
@@ -81,6 +81,27 @@ whistle update            # download the latest catalog
 whistle doctor            # what Whistle sees on this machine
 whistle install gimp
 ```
+
+<details>
+<summary>Other ways to install</summary>
+
+**Download it yourself.** Get `whistle-<arch>-linux.tar.gz` from the
+[latest release](https://github.com/thisisroot/whistle/releases/latest) and put
+the `whistle` binary on your PATH. Every release is built by GitHub Actions with
+[build provenance](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations),
+which you can check with
+`gh attestation verify whistle-x86_64-linux.tar.gz --repo thisisroot/whistle`.
+
+**Build from source** with Rust 1.88 or newer:
+
+```sh
+git clone https://github.com/thisisroot/whistle.git
+cd whistle
+cargo build --release
+install -Dm755 target/release/whistle ~/.local/bin/whistle
+```
+
+</details>
 
 ## Commands
 
@@ -91,6 +112,7 @@ whistle install gimp
 | `whistle install <app>` | Install it with the best available method. |
 | `whistle remove <app>` | Uninstall it the same way it was installed. |
 | `whistle list` | Apps installed through Whistle. |
+| `whistle upgrade [<app>...]` | Update the catalog, then upgrade what Whistle installed. |
 | `whistle update [--from URL\|PATH]` | Download the latest catalog. |
 | `whistle doctor` | Show the distro, platform tags, CPU and the tools found. |
 
@@ -102,6 +124,15 @@ Useful flags for `install`:
 | `-y` | Don't ask for confirmation. |
 | `--via <method>` | Force a method: `native`, `apt`, `pacman`, `dnf`, `zypper`, `flatpak`, `appimage`, `wine`, ... |
 | `--allow-draft` | Allow recipes that nobody has reviewed yet. |
+
+If an app is only available as a Flatpak and Flatpak isn't installed, `install`
+offers to set it up first with your package manager.
+
+`upgrade` upgrades each app the way it was installed: one package-manager call
+per manager, `flatpak update` for Flatpaks, and a fresh run of the recipe when
+the catalog has a newer revision of it (the app keeps its settings). On Arch,
+only whole-system upgrades are supported, so Whistle leaves native packages to
+`sudo pacman -Syu`.
 
 ## How it works
 
@@ -116,9 +147,9 @@ flowchart LR
 ```
 
 1. **Catalog.** `whistle update` downloads `index.json`, which
-   [whistle-server](https://github.com/thisisroot/whistle-server) rebuilds every
-   day. For each app it lists the package name on each distro, the Flatpak ref,
-   the winget ID and any recipes for running it on the other OS.
+   [whistle-server](https://github.com/thisisroot/whistle-server) rebuilds and
+   signs every day. For each app it lists the package name on each distro, the
+   Flatpak ref, the winget ID and any recipes for running it on the other OS.
 2. **Resolve.** Whistle reads `/etc/os-release` and checks which tools are
    installed. It ranks every option in this order: native package, Flatpak,
    AppImage, winget, vendor installer, Wine recipe, Proton, WSL, VM. An option
@@ -129,13 +160,17 @@ flowchart LR
    own prefix in `~/.local/share/whistle/prefixes/<recipe>` and a menu entry per
    program. Afterwards, the prefix's copies of Wine's own DLLs are replaced with
    links to the read-only originals, which keeps a prefix around 150 MB instead
-   of 1.3 GB.
+   of 1.3 GB. When the system's Wine is upgraded, the links already point to the
+   new DLLs.
 4. **Track.** Installed apps are recorded in
    `~/.local/share/whistle/installed.json`, so `whistle remove` undoes exactly
    what `install` did.
 
 ## Safety
 
+- **Signed catalog.** Whistle only accepts a downloaded catalog that is signed
+  with the key built into it ([minisign](https://jedisct1.github.io/minisign/)),
+  and refuses one older than the catalog it already has.
 - **No shell.** Every command runs as a plain argument list. Package names are
   validated before they reach a package manager.
 - **Verified downloads.** HTTPS only. Installers are checked against a pinned
@@ -153,6 +188,7 @@ flowchart LR
 | Variable | Effect |
 | --- | --- |
 | `WHISTLE_INDEX_URL` | Where `whistle update` downloads the catalog from. |
+| `WHISTLE_INDEX_PUBKEY` | The minisign public key that catalog is signed with, if it's not the official one. |
 | `WHISTLE_INDEX` | Use this index file instead of the downloaded one. |
 | `WHISTLE_ROOT` | Keep all of Whistle's files under this folder (handy for testing). |
 
@@ -179,6 +215,8 @@ to this one, or the folder in `WHISTLE_RECIPES_DIR`.
 | [`crates/whistle-cli`](crates/whistle-cli) | The `whistle` command. |
 | [`catalog/dev-index.json`](catalog/dev-index.json) | The built-in catalog. |
 | [`tests/distros`](tests/distros) | Real-distro container tests. |
+| [`install.sh`](install.sh) | The one-line installer. |
+| [`.github/workflows`](.github/workflows) | CI, and the release build (push a `v*` tag matching `Cargo.toml`). |
 
 ### The Whistle project
 
@@ -194,9 +232,9 @@ to this one, or the folder in `WHISTLE_RECIPES_DIR`.
 - [x] Native packages on Arch, Debian, Ubuntu, Fedora and openSUSE, plus Flatpak
 - [x] Windows apps through Wine recipes
 - [x] Published catalog of about 1,000 apps, rebuilt daily
-- [ ] Prebuilt binaries and a one-line installer
-- [ ] `whistle upgrade`, and Flatpak setup when it's missing
-- [ ] Signed catalog
+- [x] Prebuilt binaries and a one-line installer
+- [x] `whistle upgrade`, and Flatpak setup when it's missing
+- [x] Signed catalog
 - [ ] More verified Windows recipes
 - [ ] Proton, WSL and VM runtimes
 - [ ] Desktop app

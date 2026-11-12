@@ -7,12 +7,12 @@ use anyhow::{Context, Result, bail};
 
 use crate::backend;
 use crate::fetch;
-use crate::host::Host;
+use crate::host::{Host, Tool};
 use crate::index::{App, Source, SourceKind};
 use crate::paths::Paths;
 use crate::recipe::Runtime;
-use crate::resolve::{Candidate, Target};
-use crate::runner::Runner;
+use crate::resolve::{Candidate, Prefs, Target, best, resolve};
+use crate::runner::{Cmd, Runner};
 use crate::state::{How, Installed, State};
 use crate::wine;
 
@@ -78,6 +78,22 @@ pub fn install(ctx: &Ctx, app: &App, candidate: &Candidate, opts: &Options) -> R
         state.save(&path)?;
     }
     Ok(installed)
+}
+
+/// When nothing can install `app` here but a Flatpak could once Flatpak is
+/// installed, the commands that install Flatpak.
+pub fn flatpak_setup(app: &App, host: &Host, prefs: &Prefs) -> Option<Vec<Cmd>> {
+    if host.has(Tool::Flatpak) || best(&resolve(app, host, prefs)).is_some() {
+        return None;
+    }
+    let mut with_flatpak = host.clone();
+    with_flatpak.tools.insert(Tool::Flatpak);
+    let cands = resolve(app, &with_flatpak, prefs);
+    let chosen = best(&cands)?;
+    if !matches!(&chosen.target, Target::Source(s) if s.kind == SourceKind::Flatpak) {
+        return None;
+    }
+    backend::setup_flatpak_cmds(host).ok()
 }
 
 pub fn remove(ctx: &Ctx, installed: &Installed) -> Result<()> {
@@ -157,7 +173,6 @@ mod tests {
     use super::*;
     use crate::host::{Os, Tool};
     use crate::index::Index;
-    use crate::resolve::{Prefs, best, resolve};
     use crate::runner::DryRunner;
 
     #[test]
@@ -187,6 +202,30 @@ mod tests {
 
         remove(&ctx, &installed).unwrap();
         assert_eq!(runner.commands()[1], "sudo dnf remove -y vlc");
+    }
+
+    #[test]
+    fn offers_flatpak_setup_only_when_flatpak_is_the_way() {
+        let index = Index::builtin();
+        let spotify = index.find("spotify").unwrap();
+        let fedora = |tools: &[Tool]| {
+            Host::from_parts(
+                Os::Linux,
+                Some("ID=fedora\n"),
+                "x86_64",
+                tools.iter().copied().collect(),
+            )
+        };
+        let prefs = Prefs::default();
+        let setup = flatpak_setup(spotify, &fedora(&[Tool::Dnf, Tool::Sudo]), &prefs).unwrap();
+        let shown: Vec<String> = setup.iter().map(Cmd::display).collect();
+        assert_eq!(shown, ["sudo dnf install -y flatpak"]);
+        // Already there, or not needed because a native package exists.
+        assert!(flatpak_setup(spotify, &fedora(&[Tool::Dnf, Tool::Flatpak]), &prefs).is_none());
+        let vlc = index.find("vlc").unwrap();
+        assert!(flatpak_setup(vlc, &fedora(&[Tool::Dnf, Tool::Sudo]), &prefs).is_none());
+        // No package manager to install Flatpak with.
+        assert!(flatpak_setup(spotify, &fedora(&[]), &prefs).is_none());
     }
 
     #[test]

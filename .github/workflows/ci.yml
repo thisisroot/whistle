@@ -17,8 +17,8 @@ jobs:
       # The recipe test parses every recipe in whistle-recipes.
       WHISTLE_RECIPES_DIR: ${{ github.workspace }}/whistle-recipes
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: thisisroot/whistle-recipes
           path: whistle-recipes

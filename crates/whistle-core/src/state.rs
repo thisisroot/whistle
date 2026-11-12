@@ -98,8 +98,7 @@ impl State {
     pub fn record(&mut self, entry: Installed) {
         self.forget(&entry.app_id.clone());
         self.installed.push(entry);
-        self.installed
-            .sort_by(|a, b| a.app_name.to_lowercase().cmp(&b.app_name.to_lowercase()));
+        self.installed.sort_by_key(|a| a.app_name.to_lowercase());
     }
 
     pub fn forget(&mut self, app_id: &str) {

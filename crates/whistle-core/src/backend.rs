@@ -101,6 +101,81 @@ pub fn remove_cmds(kind: SourceKind, reference: &str, host: &Host) -> Result<Vec
     })
 }
 
+/// Install Flatpak itself with the distro's package manager. The Flathub
+/// remote is added per user when the first Flatpak app is installed.
+pub fn setup_flatpak_cmds(host: &Host) -> Result<Vec<Cmd>> {
+    let cmds = if host.has(Tool::Pacman) {
+        vec![privileged(host, "pacman").args(["-S", "--needed", "--noconfirm", "flatpak"])]
+    } else if host.has(Tool::AptGet) {
+        vec![
+            privileged(host, "apt-get").arg("update"),
+            privileged(host, "apt-get").args(["install", "-y", "flatpak"]),
+        ]
+    } else if host.has(Tool::Dnf) {
+        vec![privileged(host, "dnf").args(["install", "-y", "flatpak"])]
+    } else if host.has(Tool::Zypper) {
+        vec![privileged(host, "zypper").args(["--non-interactive", "install", "flatpak"])]
+    } else {
+        bail!("no supported package manager to install Flatpak with")
+    };
+    Ok(cmds)
+}
+
+/// Upgrade these packages, all from the same package manager, to the newest
+/// version the distro offers. Packages that aren't installed are left alone.
+pub fn upgrade_cmds(kind: SourceKind, references: &[String], host: &Host) -> Result<Vec<Cmd>> {
+    for reference in references {
+        check_ref(reference)?;
+    }
+    if references.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(match kind {
+        // Arch only supports upgrading the whole system: upgrading one package
+        // against a newer sync database is a partial upgrade, which can break it.
+        SourceKind::Pacman => {
+            bail!("Arch only supports upgrading the whole system; run `sudo pacman -Syu` instead")
+        }
+        SourceKind::Apt => vec![
+            privileged(host, "apt-get").arg("update"),
+            privileged(host, "apt-get")
+                .args(["install", "--only-upgrade", "-y"])
+                .args(references),
+        ],
+        SourceKind::Dnf => vec![
+            privileged(host, "dnf")
+                .args(["upgrade", "-y"])
+                .args(references),
+        ],
+        SourceKind::Zypper => vec![
+            privileged(host, "zypper")
+                .args(["--non-interactive", "update"])
+                .args(references),
+        ],
+        SourceKind::Flatpak => vec![
+            Cmd::new("flatpak")
+                .args(["update", "--user", "-y", "--noninteractive"])
+                .args(references),
+        ],
+        SourceKind::Winget => references
+            .iter()
+            .map(|r| {
+                Cmd::new("winget").args([
+                    "upgrade",
+                    "--id",
+                    r,
+                    "--exact",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ])
+            })
+            .collect(),
+        SourceKind::Appimage | SourceKind::VendorInstaller | SourceKind::Wsl => {
+            bail!("{kind} is not upgraded through a package manager")
+        }
+    })
+}
+
 /// Package refs come from the index; make sure one can't pass itself off as an option.
 fn check_ref(reference: &str) -> Result<()> {
     let ok = reference
@@ -152,6 +227,25 @@ mod tests {
             "flatpak install --user -y --noninteractive flathub org.gimp.GIMP"
         );
         assert!(!cmds.iter().any(|c| c.starts_with("sudo")));
+    }
+
+    #[test]
+    fn upgrades_batch_per_manager_and_refuse_partial_arch_upgrades() {
+        let refs = ["firefox".to_owned(), "gimp".to_owned()];
+        assert_eq!(
+            shown(upgrade_cmds(SourceKind::Apt, &refs, &host(false)).unwrap()),
+            [
+                "sudo apt-get update",
+                "sudo apt-get install --only-upgrade -y firefox gimp"
+            ]
+        );
+        assert_eq!(
+            shown(upgrade_cmds(SourceKind::Flatpak, &refs[..1], &host(false)).unwrap()),
+            ["flatpak update --user -y --noninteractive firefox"]
+        );
+        let err = upgrade_cmds(SourceKind::Pacman, &refs, &host(false)).unwrap_err();
+        assert!(err.to_string().contains("pacman -Syu"));
+        assert!(upgrade_cmds(SourceKind::Dnf, &["-x".to_owned()], &host(false)).is_err());
     }
 
     #[test]

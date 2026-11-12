@@ -11,4 +11,5 @@ pub mod recipe;
 pub mod resolve;
 pub mod runner;
 pub mod state;
+pub mod upgrade;
 pub mod wine;

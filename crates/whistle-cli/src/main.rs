@@ -11,6 +11,7 @@ use whistle_core::paths::Paths;
 use whistle_core::resolve::{Prefs, Via, best, resolve};
 use whistle_core::runner::{DryRunner, RealRunner, Runner};
 use whistle_core::state::State;
+use whistle_core::upgrade;
 
 /// One app store for Linux and Windows.
 #[derive(Parser)]
@@ -66,6 +67,14 @@ enum Command {
     },
     /// List apps Whistle installed.
     List,
+    /// Upgrade apps Whistle installed (all of them, or the ones named).
+    Upgrade {
+        apps: Vec<String>,
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Download the latest catalog.
     Update {
         /// URL or file to load the index from instead of the default.
@@ -168,17 +177,86 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Update { from } => {
-            let from = from
-                .or_else(|| std::env::var("WHISTLE_INDEX_URL").ok())
-                .unwrap_or_else(|| index::DEFAULT_URL.to_owned());
-            println!("Fetching {from}");
-            let index = Index::update(&from, &paths)?;
-            println!("Catalog updated: {} apps.", index.apps.len());
-            Ok(())
+        Command::Upgrade { apps, dry_run, yes } => {
+            // Like `apt update && apt upgrade`, unless a specific index was asked for.
+            if cli.index.is_none()
+                && std::env::var_os("WHISTLE_INDEX").is_none()
+                && let Err(e) = update(None, &paths)
+            {
+                eprintln!("warning: couldn't update the catalog, using the one I have: {e:#}");
+            }
+            let (index, _) = load()?;
+            let runner = runner(dry_run);
+            let ctx = Ctx {
+                host: &host,
+                paths: &paths,
+                runner: runner.as_ref(),
+            };
+            upgrade_apps(&ctx, &index, &apps, yes)
         }
+        Command::Update { from } => update(from, &paths),
         Command::Doctor => doctor(&host, &paths, load()),
     }
+}
+
+fn update(from: Option<String>, paths: &Paths) -> Result<()> {
+    let from = from
+        .or_else(|| std::env::var("WHISTLE_INDEX_URL").ok())
+        .unwrap_or_else(|| index::DEFAULT_URL.to_owned());
+    println!("Fetching {from}");
+    let index = Index::update(&from, paths)?;
+    println!("Catalog updated: {} apps.", index.apps.len());
+    Ok(())
+}
+
+fn upgrade_apps(ctx: &Ctx, index: &Index, names: &[String], yes: bool) -> Result<()> {
+    let state = State::load(&ctx.paths.state_file())?;
+    if state.installed.is_empty() {
+        println!("Nothing installed with Whistle yet.");
+        return Ok(());
+    }
+    let mut ids = Vec::new();
+    for name in names {
+        let found = state.find(name).map(|i| i.app_id.clone()).or_else(|| {
+            Some(index.find(name).ok()?.id.clone()).filter(|id| state.get(id).is_some())
+        });
+        match found {
+            Some(id) => ids.push(id),
+            None => bail!("{name:?} was not installed by Whistle"),
+        }
+    }
+    let only = (!names.is_empty()).then_some(ids.as_slice());
+    let plan = upgrade::plan(&state, index, ctx.host, only);
+
+    for (app, why) in &plan.skipped {
+        println!("Skip {app}: {why}");
+    }
+    if plan.is_empty() {
+        println!("Nothing to upgrade.");
+        return Ok(());
+    }
+    println!("Upgrade:");
+    for batch in &plan.batches {
+        println!("  {}: {}", batch.kind, batch.apps.join(", "));
+    }
+    for r in &plan.reinstalls {
+        println!("  {}: {}", r.app.name, r.change);
+    }
+    let dry = ctx.runner.is_dry();
+    if !dry && !confirm(yes)? {
+        return Ok(());
+    }
+    let failed = upgrade::apply(ctx, &plan);
+    for (what, e) in &failed {
+        eprintln!("error: upgrading {what}: {e:#}");
+    }
+    if !failed.is_empty() {
+        bail!("{} upgrade(s) failed", failed.len());
+    }
+    if !dry {
+        println!("Done.");
+    }
+    Ok(())
 }
 
 fn runner(dry_run: bool) -> Box<dyn Runner> {
@@ -245,6 +323,17 @@ fn install_app(
             existing.how.describe()
         );
     }
+    // Flatpak may be the only way to get the app, and not installed yet.
+    let setup = install::flatpak_setup(app, ctx.host, prefs);
+    let mut host = ctx.host.clone();
+    if setup.is_some() {
+        host.tools.insert(Tool::Flatpak);
+    }
+    let ctx = &Ctx {
+        host: &host,
+        paths: ctx.paths,
+        runner: ctx.runner,
+    };
     let cands = resolve(app, ctx.host, prefs);
     let Some(chosen) = best(&cands) else {
         let mut msg = format!(
@@ -258,12 +347,26 @@ fn install_app(
         bail!(msg);
     };
     println!("Install {} with {chosen}", app.name);
+    if let Some(setup) = &setup {
+        println!("Flatpak isn't installed yet. This sets it up first:");
+        for cmd in setup {
+            println!("  {}", cmd.display());
+        }
+    }
     if !dry && !confirm(yes)? {
         return Ok(());
+    }
+    for cmd in setup.iter().flatten() {
+        ctx.runner.run(cmd)?;
     }
     let installed = install::install(ctx, app, chosen, &Options { user_file: file })?;
     if !dry {
         println!("Installed {} ({}).", app.name, installed.how.describe());
+        if setup.is_some() {
+            println!(
+                "Flatpak is new on this system: log out and back in for its apps to show in your menu."
+            );
+        }
     }
     Ok(())
 }

@@ -19,6 +19,11 @@ pub const DEFAULT_URL: &str =
 /// Largest index `update` accepts.
 const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 
+/// whistle-server signs every index it publishes with minisign. A downloaded
+/// index must be signed by one of these keys; `$WHISTLE_INDEX_PUBKEY` replaces
+/// them, for catalogs published by someone else.
+const TRUSTED_KEYS: &[&str] = &["RWRlRc/lhixaEkgN7SMrn4oxizAm3Qhl7RD6vr/wduv6wxpTJk4ifQrW"];
+
 /// Small hand-written catalog used until a real index has been fetched.
 const DEV_INDEX: &str = include_str!("../../../catalog/dev-index.json");
 
@@ -190,9 +195,23 @@ impl Index {
 
     /// Fetch an index from a URL or local path, check it parses, and make it
     /// the cached index. Returns the new index.
+    ///
+    /// A downloaded index must carry a valid signature (`<url>.minisig`) and
+    /// must not be older than the cached one. A local file is trusted as is:
+    /// the user picked it.
     pub fn update(from: &str, paths: &Paths) -> Result<Self> {
-        let text = if from.starts_with("https://") {
-            crate::fetch::download_text(from, MAX_INDEX_BYTES)?
+        let downloaded = from.starts_with("https://");
+        let text = if downloaded {
+            let text = crate::fetch::download_text(from, MAX_INDEX_BYTES)?;
+            let signature = crate::fetch::download_text(&format!("{from}.minisig"), 4096)
+                .context("downloading the catalog's signature")?;
+            let keys = match std::env::var("WHISTLE_INDEX_PUBKEY") {
+                Ok(key) => vec![key],
+                Err(_) => TRUSTED_KEYS.iter().map(|k| (*k).to_owned()).collect(),
+            };
+            verify_signature(text.as_bytes(), &signature, &keys)
+                .with_context(|| format!("checking the signature of {from}"))?;
+            text
         } else if from.contains("://") {
             bail!("refusing to fetch the index over anything but HTTPS: {from}");
         } else {
@@ -200,6 +219,9 @@ impl Index {
         };
         let index = Self::parse(&text).with_context(|| format!("loading index from {from}"))?;
         let dest = paths.index_cache();
+        if downloaded && let Ok(cached) = Self::from_file(&dest) {
+            check_not_older(&index, &cached)?;
+        }
         std::fs::create_dir_all(&paths.cache)?;
         let tmp = dest.with_extension("json.tmp");
         std::fs::write(&tmp, &text)?;
@@ -287,9 +309,80 @@ impl Index {
     }
 }
 
+/// Fail unless `signature` (a minisign `.minisig` file) signs `data` with one of `keys`.
+pub fn verify_signature(data: &[u8], signature: &str, keys: &[String]) -> Result<()> {
+    use minisign_verify::{PublicKey, Signature};
+    let signature =
+        Signature::decode(signature).map_err(|e| anyhow::anyhow!("unreadable signature: {e}"))?;
+    for key in keys {
+        let key = PublicKey::from_base64(key.trim())
+            .map_err(|e| anyhow::anyhow!("invalid public key {key:?}: {e}"))?;
+        if key.verify(data, &signature, false).is_ok() {
+            return Ok(());
+        }
+    }
+    bail!("the signature doesn't match Whistle's catalog key; refusing this catalog")
+}
+
+/// Refuse to go back to an older catalog: replaying an old, validly signed
+/// index could bring back entries that have since been fixed.
+fn check_not_older(new: &Index, cached: &Index) -> Result<()> {
+    // Only real timestamps compare; the dev catalog says "dev".
+    let stamped = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
+    if stamped(&new.generated_at)
+        && stamped(&cached.generated_at)
+        && new.generated_at < cached.generated_at
+    {
+        bail!(
+            "the downloaded catalog ({}) is older than the one you have ({}); refusing it",
+            new.generated_at,
+            cached.generated_at
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A throwaway key, and its signature of `SIGNED`. Not the production key.
+    const TEST_KEY: &str = "RWRcxJ29e0CY/r/Y7ii14xOQjyGlzqM4R+hqj9T+9CJegW2KfBa1iiUY";
+    const SIGNED: &str = r#"{"format":1,"apps":[]}"#;
+    const SIGNATURE: &str = "untrusted comment: signature from minisign secret key
+RURcxJ29e0CY/itLjeG9NPEDnsyz73rMXaZel2ei8bqcgjbSywkgskQjv3U3BzWlDWwb3b9JIG5TzD7sEyZz3A9LDxuZLrzHvw0=
+trusted comment: whistle test
+oD+we1r382ycHPx0yXJ0npPRw/bHuG4CBnct31JezJ2zoO6aa3Y5anDHa/eMRvkMLRr/6WBx8ZkJXWK69kPsBg==
+";
+
+    #[test]
+    fn signatures_are_checked() {
+        let test_key = [TEST_KEY.to_owned()];
+        verify_signature(SIGNED.as_bytes(), SIGNATURE, &test_key).unwrap();
+        // Tampered data, the wrong key, or garbage are all refused.
+        assert!(verify_signature(br#"{"format":1,"apps":[ ]}"#, SIGNATURE, &test_key).is_err());
+        let production: Vec<String> = TRUSTED_KEYS.iter().map(|k| (*k).to_owned()).collect();
+        assert!(verify_signature(SIGNED.as_bytes(), SIGNATURE, &production).is_err());
+        assert!(verify_signature(SIGNED.as_bytes(), "not a signature", &test_key).is_err());
+        // Any one of several keys may match, which allows rotating keys.
+        let both = [production[0].clone(), TEST_KEY.to_owned()];
+        verify_signature(SIGNED.as_bytes(), SIGNATURE, &both).unwrap();
+    }
+
+    #[test]
+    fn older_catalogs_are_refused() {
+        let at = |t: &str| Index {
+            format: FORMAT,
+            generated_at: t.to_owned(),
+            apps: Vec::new(),
+        };
+        let today = at("2026-11-12T04:00:00Z");
+        assert!(check_not_older(&at("2026-11-11T04:00:00Z"), &today).is_err());
+        assert!(check_not_older(&at("2026-11-12T04:00:00Z"), &today).is_ok());
+        assert!(check_not_older(&at("2026-11-13T04:00:00Z"), &today).is_ok());
+        // The dev catalog isn't dated, so it never blocks an update.
+        assert!(check_not_older(&today, &at("dev")).is_ok());
+    }
 
     #[test]
     fn builtin_index_loads() {

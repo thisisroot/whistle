@@ -132,11 +132,14 @@ pub fn install(
             dir.display()
         )),
         Some(dir) => {
+            // Nothing new to share when upgrading a prefix that's already linked.
             let saved = link_builtin_dlls(&prefix, &dir)?;
-            runner.note(&format!(
-                "shared {} MB of Wine DLLs instead of copying them",
-                saved / (1024 * 1024)
-            ));
+            if saved > 0 {
+                runner.note(&format!(
+                    "shared {} MB of Wine DLLs instead of copying them",
+                    saved / (1024 * 1024)
+                ));
+            }
         }
         None => runner.note("Wine's install directory not found; keeping the prefix's DLL copies"),
     }
