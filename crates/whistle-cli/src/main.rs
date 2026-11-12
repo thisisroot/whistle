@@ -272,18 +272,42 @@ fn search(index: &Index, host: &Host, query: &str) -> Result<()> {
     if hits.is_empty() {
         println!("No apps match {query:?}.");
     }
+    let mut needs_flatpak = false;
     for app in hits {
-        let cands = resolve(app, host, &Prefs::default());
-        let how = best(&cands).map_or("unavailable".to_owned(), |c| c.method().to_owned());
+        let prefs = Prefs::default();
+        let cands = resolve(app, host, &prefs);
+        let how = match best(&cands) {
+            Some(c) => c.method().to_owned(),
+            None if install::flatpak_setup(app, host, &prefs).is_some() => {
+                needs_flatpak = true;
+                "flatpak*".to_owned()
+            }
+            None => "unavailable".to_owned(),
+        };
         println!(
             "{:<20} {:<40} {:<14} {}",
-            app.name,
-            app.id,
+            fit(&app.name, 20),
+            fit(&app.id, 40),
             format!("[{how}]"),
             app.summary
         );
     }
+    if needs_flatpak {
+        println!(
+            "\n* Needs Flatpak, which isn't installed. `whistle install` can set it up for you."
+        );
+    }
     Ok(())
+}
+
+/// Shorten `text` to `width` characters, marking the cut with an ellipsis.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(width - 1).collect();
+    short.push('…');
+    short
 }
 
 fn info(app: &App, host: &Host, prefs: &Prefs) -> Result<()> {
@@ -304,6 +328,12 @@ fn info(app: &App, host: &Host, prefs: &Prefs) -> Result<()> {
             None => String::new(),
         };
         println!("  {}. {c}{note}", n + 1);
+    }
+    if chosen.is_none() && install::flatpak_setup(app, host, prefs).is_some() {
+        println!(
+            "\n`whistle install {}` can set up Flatpak for you first.",
+            app.id
+        );
     }
     Ok(())
 }
