@@ -101,22 +101,42 @@ pub fn remove_cmds(kind: SourceKind, reference: &str, host: &Host) -> Result<Vec
     })
 }
 
-/// Install Flatpak itself with the distro's package manager. The Flathub
-/// remote is added per user when the first Flatpak app is installed.
-pub fn setup_flatpak_cmds(host: &Host) -> Result<Vec<Cmd>> {
+/// Install runtimes such as Flatpak or Wine with the distro's package manager.
+/// (The Flathub remote is added per user with the first Flatpak app.)
+pub fn setup_cmds(host: &Host, packages: &[&str]) -> Result<Vec<Cmd>> {
+    for package in packages {
+        check_ref(package)?;
+    }
     let cmds = if host.has(Tool::Pacman) {
-        vec![privileged(host, "pacman").args(["-S", "--needed", "--noconfirm", "flatpak"])]
+        vec![
+            privileged(host, "pacman")
+                .args(["-S", "--needed", "--noconfirm"])
+                .args(packages.iter().copied()),
+        ]
     } else if host.has(Tool::AptGet) {
         vec![
             privileged(host, "apt-get").arg("update"),
-            privileged(host, "apt-get").args(["install", "-y", "flatpak"]),
+            privileged(host, "apt-get")
+                .args(["install", "-y"])
+                .args(packages.iter().copied()),
         ]
     } else if host.has(Tool::Dnf) {
-        vec![privileged(host, "dnf").args(["install", "-y", "flatpak"])]
+        vec![
+            privileged(host, "dnf")
+                .args(["install", "-y"])
+                .args(packages.iter().copied()),
+        ]
     } else if host.has(Tool::Zypper) {
-        vec![privileged(host, "zypper").args(["--non-interactive", "install", "flatpak"])]
+        vec![
+            privileged(host, "zypper")
+                .args(["--non-interactive", "install"])
+                .args(packages.iter().copied()),
+        ]
     } else {
-        bail!("no supported package manager to install Flatpak with")
+        bail!(
+            "no supported package manager to install {} with",
+            packages.join(", ")
+        )
     };
     Ok(cmds)
 }

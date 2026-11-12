@@ -9,12 +9,16 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 directories.workspace = true
+flate2.workspace = true
 minisign-verify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 ureq.workspace = true
 which.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 serde_yaml.workspace = true

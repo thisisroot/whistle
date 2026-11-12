@@ -70,6 +70,49 @@ pub fn download_text(url: &str, max_bytes: u64) -> Result<String> {
     Ok(text)
 }
 
+/// Download a small file over HTTPS, refusing anything larger than `max_bytes`.
+pub fn download_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    if !url.starts_with("https://") {
+        bail!("refusing to download over plain HTTP: {url}");
+    }
+    let response = ureq::get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {url}"))?;
+    if bytes.len() as u64 > max_bytes {
+        bail!("{url} is larger than {max_bytes} bytes");
+    }
+    Ok(bytes)
+}
+
+/// Download a gzip-compressed text file and unpack it, refusing more than
+/// `max_bytes` unpacked. `None` if the server doesn't have the file.
+pub fn download_gzip_text(url: &str, max_bytes: u64) -> Result<Option<String>> {
+    if !url.starts_with("https://") {
+        bail!("refusing to download over plain HTTP: {url}");
+    }
+    let response = match ureq::get(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(400..=499)) => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("downloading {url}")),
+    };
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(response.into_body().into_reader())
+        .take(max_bytes + 1)
+        .read_to_string(&mut text)
+        .with_context(|| format!("unpacking {url}"))?;
+    if text.len() as u64 > max_bytes {
+        bail!("{url} unpacks to more than {max_bytes} bytes");
+    }
+    Ok(Some(text))
+}
+
 /// Download `url` into `dir/name` and check it against `sha256`. A cached copy
 /// with the right hash is reused; a wrong hash deletes the file.
 pub fn download_verified(url: &str, sha256: &str, dir: &Path, name: &str) -> Result<PathBuf> {

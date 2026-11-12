@@ -2,13 +2,19 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod complete;
+mod image;
+
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::ArgValueCompleter;
+use serde_json::json;
 use whistle_core::host::{Host, Tool};
-use whistle_core::index::{self, App, Index, IndexOrigin};
+use whistle_core::index::{self, App, Index, IndexOrigin, Lookup, RecipeStatus};
 use whistle_core::install::{self, Ctx, Options};
+use whistle_core::packages;
 use whistle_core::paths::Paths;
-use whistle_core::resolve::{Prefs, Via, best, resolve};
+use whistle_core::resolve::{Prefs, Target, Via, best, resolve};
 use whistle_core::runner::{DryRunner, RealRunner, Runner};
 use whistle_core::state::State;
 use whistle_core::upgrade;
@@ -20,19 +26,27 @@ struct Cli {
     /// Use this catalog index file instead of the cached or built-in one.
     #[arg(long, global = true, value_name = "PATH")]
     index: Option<PathBuf>,
+    /// Print JSON instead of text (search, info, list, categories).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Find apps in the catalog.
+    /// Find apps in the catalog, and in your distro's packages.
     Search {
-        #[arg(required = true)]
+        #[arg(required_unless_present = "category")]
         query: Vec<String>,
+        #[command(flatten)]
+        filter: Filter,
     },
+    /// List the app categories and how many apps each has.
+    Categories,
     /// Show an app and every way to install it here.
     Info {
+        #[arg(add = ArgValueCompleter::new(complete::catalog_apps))]
         app: String,
         /// Treat draft recipes as usable.
         #[arg(long)]
@@ -40,6 +54,7 @@ enum Command {
     },
     /// Install an app the best available way.
     Install {
+        #[arg(add = ArgValueCompleter::new(complete::catalog_apps))]
         app: String,
         /// Force a method: native, pacman, apt, dnf, zypper, flatpak, appimage, winget, wine, ...
         #[arg(long, value_name = "METHOD")]
@@ -59,6 +74,7 @@ enum Command {
     },
     /// Remove an app Whistle installed.
     Remove {
+        #[arg(add = ArgValueCompleter::new(complete::installed_apps))]
         app: String,
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -69,6 +85,7 @@ enum Command {
     List,
     /// Upgrade apps Whistle installed (all of them, or the ones named).
     Upgrade {
+        #[arg(add = ArgValueCompleter::new(complete::installed_apps))]
         apps: Vec<String>,
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -83,7 +100,43 @@ enum Command {
     },
     /// Show what Whistle knows about this machine.
     Doctor,
+    /// Update Whistle itself to the latest release.
+    SelfUpdate {
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
+
+/// Which search results to show.
+#[derive(clap::Args, Default)]
+struct Filter {
+    /// Only apps your distro's package manager installs.
+    #[arg(long, group = "method")]
+    native: bool,
+    /// Only Flatpaks.
+    #[arg(long, group = "method")]
+    flatpak: bool,
+    /// Only Windows apps (run with Wine).
+    #[arg(long, group = "method")]
+    windows: bool,
+    /// Only apps in this category, such as Game or Graphics (see `whistle categories`).
+    #[arg(long, value_name = "NAME")]
+    category: Option<String>,
+}
+
+/// The freedesktop main categories `categories` lists.
+const MAIN_CATEGORIES: [&str; 10] = [
+    "AudioVideo",
+    "Development",
+    "Education",
+    "Game",
+    "Graphics",
+    "Network",
+    "Office",
+    "Science",
+    "System",
+    "Utility",
+];
 
 fn main() -> ExitCode {
     // Rust ignores SIGPIPE, so `whistle search x | head` would panic on the
@@ -92,6 +145,8 @@ fn main() -> ExitCode {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    // Answers the shell's tab-completion requests (COMPLETE=bash whistle ...).
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -107,17 +162,31 @@ fn run(cli: Cli) -> Result<()> {
     let load = || Index::load(cli.index.as_deref(), &paths);
 
     match cli.command {
-        Command::Search { query } => search(&load()?.0, &host, &query.join(" ")),
+        Command::Search { query, filter } => {
+            search(&load()?.0, &host, &query.join(" "), &filter, cli.json)
+        }
+        Command::Categories => categories(&load()?.0, cli.json),
         Command::Info { app, allow_draft } => {
             let (index, _) = load()?;
-            info(
-                index.find(&app)?,
-                &host,
-                &Prefs {
-                    via: None,
-                    allow_draft,
-                },
-            )
+            let prefs = Prefs {
+                via: None,
+                allow_draft,
+            };
+            match choose(index.lookup(&app), &app, false)? {
+                Some(found) => info(found, &host, &prefs, cli.json),
+                None => {
+                    // Not an app in the catalog, but maybe one of the distro's packages.
+                    let package =
+                        packages::manager(&host).and_then(|kind| packages::find(kind, &app));
+                    let (Some(package), Some(mut fallback)) =
+                        (package, install::distro_package(&app, &host))
+                    else {
+                        bail!("no app or package matches {app:?}; try `whistle search`");
+                    };
+                    fallback.summary = package.summary;
+                    info(&fallback, &host, &prefs, cli.json)
+                }
+            }
         }
         Command::Install {
             app,
@@ -128,7 +197,19 @@ fn run(cli: Cli) -> Result<()> {
             allow_draft,
         } => {
             let (index, _) = load()?;
-            let app = index.find(&app)?;
+            // Anything the catalog doesn't know may still be a distro package.
+            let fallback;
+            let app = match choose(index.lookup(&app), &app, yes)? {
+                Some(found) => found,
+                None => {
+                    fallback = install::distro_package(&app, &host)
+                        .with_context(|| format!("no app matches {app:?}; try `whistle search`"))?;
+                    println!(
+                        "{app:?} isn't in the Whistle catalog; trying your distro's package of that name."
+                    );
+                    &fallback
+                }
+            };
             let prefs = Prefs { via, allow_draft };
             let runner = runner(dry_run);
             let ctx = Ctx {
@@ -169,6 +250,10 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::List => {
             let state = State::load(&paths.state_file())?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&state.installed)?);
+                return Ok(());
+            }
             if state.installed.is_empty() {
                 println!("Nothing installed with Whistle yet.");
             }
@@ -196,6 +281,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Update { from } => update(from, &paths),
         Command::Doctor => doctor(&host, &paths, load()),
+        Command::SelfUpdate { yes } => self_update(yes),
     }
 }
 
@@ -267,22 +353,90 @@ fn runner(dry_run: bool) -> Box<dyn Runner> {
     }
 }
 
-fn search(index: &Index, host: &Host, query: &str) -> Result<()> {
-    let hits = index.search(query);
-    if hits.is_empty() {
-        println!("No apps match {query:?}.");
-    }
-    let mut needs_flatpak = false;
-    for app in hits {
-        let prefs = Prefs::default();
+/// How many of the distro's packages `search` lists.
+const MAX_PACKAGES: usize = 20;
+
+fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) -> Result<()> {
+    let prefs = Prefs::default();
+    let category = filter.category.as_deref();
+    let mut rows = Vec::new();
+    for app in index.search(query) {
+        if let Some(category) = category
+            && !app
+                .categories
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(category))
+        {
+            continue;
+        }
         let cands = resolve(app, host, &prefs);
-        let how = match best(&cands) {
-            Some(c) => c.method().to_owned(),
-            None if install::flatpak_setup(app, host, &prefs).is_some() => {
-                needs_flatpak = true;
-                "flatpak*".to_owned()
+        let chosen = best(&cands);
+        let setup = chosen
+            .is_none()
+            .then(|| install::runtime_setup(app, host, &prefs))
+            .flatten();
+        let method = chosen.map(|c| c.method().to_owned());
+        let keep = match (filter.native, filter.flatpak, filter.windows) {
+            (true, ..) => {
+                chosen.is_some_and(|c| matches!(&c.target, Target::Source(s) if s.kind.is_native()))
             }
-            None => "unavailable".to_owned(),
+            (_, true, _) => app
+                .sources
+                .iter()
+                .any(|s| s.kind == index::SourceKind::Flatpak),
+            (.., true) => !app.recipes.is_empty() && !app.has_linux_source(),
+            _ => true,
+        };
+        if keep {
+            rows.push((app, method, setup));
+        }
+    }
+    // The distro's own packages, when looking for something by name.
+    let packages = if query.is_empty() || category.is_some() || filter.flatpak || filter.windows {
+        None
+    } else {
+        search_packages(index, host, query)
+    };
+
+    if json {
+        let apps: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(app, method, setup)| {
+                json!({
+                    "id": app.id,
+                    "name": app.name,
+                    "summary": app.summary,
+                    "categories": app.categories,
+                    "icon_url": app.icon_url,
+                    "method": method,
+                    "needs_setup": setup.as_ref().map(|s| s.name),
+                })
+            })
+            .collect();
+        let (manager, found) = packages.unwrap_or((index::SourceKind::Apt, Vec::new()));
+        let packages: Vec<serde_json::Value> = found
+            .iter()
+            .map(|p| json!({"name": p.name, "summary": p.summary, "manager": manager.as_str()}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"apps": apps, "packages": packages}))?
+        );
+        return Ok(());
+    }
+
+    if rows.is_empty() && packages.as_ref().is_none_or(|(_, found)| found.is_empty()) {
+        println!("Nothing matches.");
+    }
+    let mut needs = std::collections::BTreeSet::new();
+    for (app, method, setup) in &rows {
+        let how = match (method, setup) {
+            (Some(method), _) => method.clone(),
+            (None, Some(setup)) => {
+                needs.insert(setup.name);
+                format!("{}*", setup.name.to_lowercase())
+            }
+            (None, None) => "unavailable".to_owned(),
         };
         println!(
             "{:<20} {:<40} {:<14} {}",
@@ -292,12 +446,74 @@ fn search(index: &Index, host: &Host, query: &str) -> Result<()> {
             app.summary
         );
     }
-    if needs_flatpak {
+    if !needs.is_empty() {
+        let names: Vec<&str> = needs.into_iter().collect();
         println!(
-            "\n* Needs Flatpak, which isn't installed. `whistle install` can set it up for you."
+            "\n* Needs {}, which isn't installed yet. `whistle install` can set it up for you.",
+            names.join(" or ")
         );
     }
+    if let Some((kind, found)) = packages
+        && !found.is_empty()
+    {
+        println!("\nMore packages from {kind}:");
+        for package in found.iter().take(MAX_PACKAGES) {
+            println!("{:<30} {}", fit(&package.name, 30), package.summary);
+        }
+        if found.len() > MAX_PACKAGES {
+            println!("... and {} more", found.len() - MAX_PACKAGES);
+        }
+    }
     Ok(())
+}
+
+fn categories(index: &Index, json: bool) -> Result<()> {
+    let counts: Vec<(&str, usize)> = MAIN_CATEGORIES
+        .iter()
+        .map(|c| {
+            (
+                *c,
+                index
+                    .apps
+                    .iter()
+                    .filter(|a| a.categories.iter().any(|x| x == c))
+                    .count(),
+            )
+        })
+        .collect();
+    if json {
+        let map: serde_json::Map<String, serde_json::Value> = counts
+            .iter()
+            .map(|(c, n)| ((*c).to_owned(), json!(n)))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&map)?);
+        return Ok(());
+    }
+    for (category, count) in counts {
+        println!("{category:<14} {count:>6} apps");
+    }
+    println!("\n`whistle search --category <name>` lists them.");
+    Ok(())
+}
+
+/// The distro's packages matching `query` that the catalog doesn't already
+/// list as an app's package.
+fn search_packages(
+    index: &Index,
+    host: &Host,
+    query: &str,
+) -> Option<(index::SourceKind, Vec<packages::Package>)> {
+    let kind = packages::manager(host)?;
+    let known: std::collections::HashSet<&str> = index
+        .apps
+        .iter()
+        .flat_map(|a| &a.sources)
+        .filter(|s| s.kind == kind)
+        .map(|s| s.reference.as_str())
+        .collect();
+    let mut found = packages::search(kind, query);
+    found.retain(|p| !known.contains(p.name.as_str()));
+    Some((kind, found))
 }
 
 /// Shorten `text` to `width` characters, marking the cut with an ellipsis.
@@ -310,10 +526,71 @@ fn fit(text: &str, width: usize) -> String {
     short
 }
 
-fn info(app: &App, host: &Host, prefs: &Prefs) -> Result<()> {
+fn info(app: &App, host: &Host, prefs: &Prefs, json: bool) -> Result<()> {
+    if json {
+        let cands = resolve(app, host, prefs);
+        let chosen = best(&cands).map(|c| c as *const _);
+        let options: Vec<serde_json::Value> = cands
+            .iter()
+            .map(|c| {
+                json!({
+                    "method": c.method(),
+                    "description": c.to_string(),
+                    "blocker": c.blocker,
+                    "chosen": Some(c as *const _) == chosen,
+                })
+            })
+            .collect();
+        let setup = chosen
+            .is_none()
+            .then(|| install::runtime_setup(app, host, prefs))
+            .flatten();
+        let out = json!({
+            "id": app.id,
+            "name": app.name,
+            "summary": app.summary,
+            "categories": app.categories,
+            "homepage": app.homepage,
+            "license": app.license,
+            "icon_url": app.icon_url,
+            "screenshots": app.screenshots,
+            "host": host.describe(),
+            "options": options,
+            "needs_setup": setup.map(|s| s.name),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if !app.icon_url.is_empty() {
+        image::show_icon(&app.icon_url);
+    }
     println!("{} ({})", app.name, app.id);
     if !app.summary.is_empty() {
         println!("{}", app.summary);
+    }
+    let details = [
+        ("Homepage", app.homepage.clone()),
+        ("License", app.license.clone()),
+        ("Categories", app.categories.join(", ")),
+    ];
+    let mut blank_line = true;
+    for (label, value) in details {
+        if !value.is_empty() {
+            if blank_line {
+                println!();
+                blank_line = false;
+            }
+            println!("{:<12} {value}", format!("{label}:"));
+        }
+    }
+    if let Some(first) = app.screenshots.first() {
+        if blank_line {
+            println!();
+        }
+        println!("{:<12} {first}", "Screenshots:");
+        for more in &app.screenshots[1..] {
+            println!("{:<12} {more}", "");
+        }
     }
     println!("\nOn {}:", host.describe());
     let cands = resolve(app, host, prefs);
@@ -329,12 +606,39 @@ fn info(app: &App, host: &Host, prefs: &Prefs) -> Result<()> {
         };
         println!("  {}. {c}{note}", n + 1);
     }
-    if chosen.is_none() && install::flatpak_setup(app, host, prefs).is_some() {
+    if chosen.is_none()
+        && let Some(setup) = install::runtime_setup(app, host, prefs)
+    {
         println!(
-            "\n`whistle install {}` can set up Flatpak for you first.",
-            app.id
+            "\n`whistle install {}` can set up {} for you first.",
+            app.id, setup.name
         );
     }
+    Ok(())
+}
+
+fn self_update(yes: bool) -> Result<()> {
+    let tag = whistle_core::selfupdate::latest_tag()?;
+    if !whistle_core::selfupdate::is_newer(&tag) {
+        println!(
+            "Whistle {} is the latest version.",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+    let exe = std::env::current_exe()
+        .context("finding the whistle binary")?
+        .canonicalize()?;
+    println!(
+        "Update Whistle {} to {tag} ({})",
+        env!("CARGO_PKG_VERSION"),
+        exe.display()
+    );
+    if !confirm(yes)? {
+        return Ok(());
+    }
+    whistle_core::selfupdate::install(&tag, &exe)?;
+    println!("Updated to {tag}.");
     Ok(())
 }
 
@@ -353,11 +657,16 @@ fn install_app(
             existing.how.describe()
         );
     }
-    // Flatpak may be the only way to get the app, and not installed yet.
-    let setup = install::flatpak_setup(app, ctx.host, prefs);
+    // Flatpak or Wine may be the only way to get the app, and not installed yet.
+    let setup = install::runtime_setup(app, ctx.host, prefs);
+    let setup_cmds = match &setup {
+        Some(setup) => install::setup_cmds(setup, ctx.host)
+            .with_context(|| format!("{} needs {}, but", app.name, setup.name))?,
+        None => Vec::new(),
+    };
     let mut host = ctx.host.clone();
-    if setup.is_some() {
-        host.tools.insert(Tool::Flatpak);
+    if let Some(setup) = &setup {
+        host.tools.extend(setup.tools.iter().map(|(tool, _)| *tool));
     }
     let ctx = &Ctx {
         host: &host,
@@ -377,28 +686,83 @@ fn install_app(
         bail!(msg);
     };
     println!("Install {} with {chosen}", app.name);
+    if let Target::Recipe { entry, .. } = &chosen.target
+        && entry.status == RecipeStatus::Untested
+    {
+        println!(
+            "Note: this recipe was generated automatically and nobody has tried it yet. \
+             The app may not work under Wine; Whistle checks that it starts."
+        );
+    }
     if let Some(setup) = &setup {
-        println!("Flatpak isn't installed yet. This sets it up first:");
-        for cmd in setup {
+        println!("{} isn't installed yet. This sets it up first:", setup.name);
+        for cmd in &setup_cmds {
             println!("  {}", cmd.display());
         }
     }
     if !dry && !confirm(yes)? {
         return Ok(());
     }
-    for cmd in setup.iter().flatten() {
+    for cmd in &setup_cmds {
         ctx.runner.run(cmd)?;
     }
     let installed = install::install(ctx, app, chosen, &Options { user_file: file })?;
     if !dry {
         println!("Installed {} ({}).", app.name, installed.how.describe());
-        if setup.is_some() {
+        if setup.as_ref().is_some_and(|s| s.name == "Flatpak") {
             println!(
                 "Flatpak is new on this system: log out and back in for its apps to show in your menu."
             );
         }
     }
     Ok(())
+}
+
+/// How many apps `choose` offers.
+const MAX_CHOICES: usize = 15;
+
+/// The app a lookup settled on. When several match, ask which one, unless
+/// there's no one to ask (`-y`, or not a terminal).
+fn choose<'a>(lookup: Lookup<'a>, query: &str, yes: bool) -> Result<Option<&'a App>> {
+    let apps = match lookup {
+        Lookup::One(app) => return Ok(Some(app)),
+        Lookup::None => return Ok(None),
+        Lookup::Many(apps) => apps,
+    };
+    if yes || !std::io::stdin().is_terminal() {
+        bail!("{}; name one by its id", Lookup::describe(query, &apps));
+    }
+    println!("Several apps match {query:?}:");
+    for (n, app) in apps.iter().take(MAX_CHOICES).enumerate() {
+        println!(
+            "  {:>2}. {:<24} {:<40} {}",
+            n + 1,
+            fit(&app.name, 24),
+            fit(&app.id, 40),
+            fit(&app.summary, 50)
+        );
+    }
+    if apps.len() > MAX_CHOICES {
+        println!(
+            "  ... and {} more; `whistle search {query}` lists them all",
+            apps.len() - MAX_CHOICES
+        );
+    }
+    print!(
+        "Which one? [1-{}, Enter to cancel] ",
+        apps.len().min(MAX_CHOICES)
+    );
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    let answer = answer.trim();
+    if answer.is_empty() {
+        bail!("cancelled");
+    }
+    match answer.parse::<usize>() {
+        Ok(n) if (1..=apps.len().min(MAX_CHOICES)).contains(&n) => Ok(Some(apps[n - 1])),
+        _ => bail!("{answer:?} isn't one of the numbers"),
+    }
 }
 
 /// Ask before changing the system; `-y` skips the question.

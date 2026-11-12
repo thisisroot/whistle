@@ -28,6 +28,9 @@ pub struct Recipe {
     pub installer: Installer,
     #[serde(default)]
     pub steps: Vec<Step>,
+    /// Programs to add to the menu. Empty means: the Start Menu shortcuts the
+    /// installer creates.
+    #[serde(default)]
     pub launchers: Vec<Launcher>,
     #[serde(default)]
     pub health_check: Option<HealthCheck>,

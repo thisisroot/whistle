@@ -16,10 +16,56 @@ use crate::runner::{Cmd, Runner};
 
 const DEFAULT_INSTALLER_TIMEOUT: u64 = 1800;
 
+/// Start Menu shortcuts that aren't the app itself.
+const NOT_LAUNCHERS: &[&str] = &[
+    "uninstall",
+    "remove",
+    "readme",
+    "read me",
+    "website",
+    "web site",
+    "homepage",
+    "help",
+    "manual",
+    "documentation",
+    "license",
+    "changelog",
+    "release notes",
+];
+
 #[derive(Debug)]
 pub struct WineInstall {
     pub prefix: PathBuf,
     pub desktop_files: Vec<PathBuf>,
+    /// The programs that got menu entries, and the environment they run with.
+    pub launchers: Vec<Launcher>,
+    pub launcher_env: Vec<(String, String)>,
+}
+
+/// Programs every prefix runs that aren't the app.
+const WINE_PROGRAMS: &[&str] = &[
+    "conhost.exe",
+    "explorer.exe",
+    "mscorsvw.exe",
+    "plugplay.exe",
+    "rpcss.exe",
+    "rundll32.exe",
+    "services.exe",
+    "start.exe",
+    "svchost.exe",
+    "tabtip.exe",
+    "wineboot.exe",
+    "winedevice.exe",
+    "winemenubuilder.exe",
+];
+
+pub enum Health {
+    /// The app was still running when checked.
+    Running,
+    /// The app had exited by then.
+    Exited,
+    /// The check couldn't run, and why.
+    Skipped(String),
 }
 
 pub fn prefix_for(paths: &Paths, recipe_id: &str) -> PathBuf {
@@ -54,9 +100,28 @@ pub fn install(
         };
         env.push(("WINEARCH".to_owned(), arch.to_owned()));
     }
-    // Variables from `env` steps also apply to the launchers.
-    let mut launcher_env = Vec::new();
+    // Wine's menu builder writes menu entries, icons and file associations
+    // straight into the user's home. During the install it writes into this
+    // staging folder instead, where Whistle picks what it needs.
+    let staging = paths.cache.join("menus").join(&recipe.id);
+    env.push((
+        "XDG_DATA_HOME".to_owned(),
+        staging.join("data").display().to_string(),
+    ));
+    env.push((
+        "XDG_CONFIG_HOME".to_owned(),
+        staging.join("config").display().to_string(),
+    ));
+    // Variables from `env` steps also apply to the launchers, which never run
+    // the menu builder.
+    let mut launcher_env = vec![(
+        "WINEDLLOVERRIDES".to_owned(),
+        "winemenubuilder.exe=d".to_owned(),
+    )];
 
+    if !runner.is_dry() {
+        reset_staging(&staging)?;
+    }
     create_dir(runner, &prefix)?;
     runner.run(&Cmd::new("wineboot").arg("--init").envs(&env))?;
 
@@ -98,12 +163,21 @@ pub fn install(
             Step::Env(vars) => {
                 for (k, v) in vars {
                     env.push((k.clone(), v.clone()));
+                    launcher_env.retain(|(name, _)| name != k);
                     launcher_env.push((k.clone(), v.clone()));
                 }
             }
             Step::RunInstaller(run) => {
                 let timeout = run.timeout_s.unwrap_or(DEFAULT_INSTALLER_TIMEOUT);
-                let mut cmd = Cmd::new("wine")
+                let is_msi = media
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
+                let program = if is_msi {
+                    Cmd::new("wine").args(["msiexec", "/i"])
+                } else {
+                    Cmd::new("wine")
+                };
+                let mut cmd = program
                     .arg(media.display().to_string())
                     .args(&run.args)
                     .envs(&env)
@@ -144,8 +218,24 @@ pub fn install(
         None => runner.note("Wine's install directory not found; keeping the prefix's DLL copies"),
     }
 
+    let launchers = if !recipe.launchers.is_empty() {
+        recipe.launchers.clone()
+    } else if runner.is_dry() {
+        runner.note("add the installer's Start Menu shortcuts to the menu");
+        Vec::new()
+    } else {
+        let found = discover_launchers(&staging, &prefix)?;
+        if found.is_empty() {
+            runner.note("the installer created no Start Menu shortcuts, so there is no menu entry");
+        }
+        found
+    };
+    if !runner.is_dry() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
     let mut desktop_files = Vec::new();
-    for launcher in &recipe.launchers {
+    for launcher in &launchers {
         let path = paths
             .applications
             .join(desktop_file_name(&recipe.id, &launcher.name));
@@ -162,7 +252,212 @@ pub fn install(
     Ok(WineInstall {
         prefix,
         desktop_files,
+        launchers,
+        launcher_env,
     })
+}
+
+/// Start `launcher` and check the app is still running after `wait`, then
+/// close it again. Wine's `start` exits right away even when the app runs, so
+/// this looks at the prefix's processes rather than an exit code.
+pub fn health_check(done: &WineInstall, launcher: &Launcher, wait: Duration) -> Result<Health> {
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Ok(Health::Skipped("no display to open a window on".into()));
+    }
+    let mut child = std::process::Command::new("wine")
+        .arg(&launcher.exe)
+        .args(&launcher.args)
+        .env("WINEPREFIX", &done.prefix)
+        .envs(done.launcher_env.iter().map(|(k, v)| (k, v)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("starting wine")?;
+    std::thread::sleep(wait);
+    let running = !app_processes(&done.prefix).is_empty();
+    // Close the app and everything else in the prefix.
+    if let Some(server) = wineserver() {
+        let _ = std::process::Command::new(&server)
+            .arg("-k")
+            .env("WINEPREFIX", &done.prefix)
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(if running {
+        Health::Running
+    } else {
+        Health::Exited
+    })
+}
+
+/// The Windows programs running in `prefix`, apart from Wine's own.
+fn app_processes(prefix: &Path) -> Vec<String> {
+    let wanted = format!("WINEPREFIX={}", prefix.display());
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for proc in procs.flatten() {
+        let dir = proc.path();
+        let Ok(environ) = std::fs::read(dir.join("environ")) else {
+            continue;
+        };
+        if !environ
+            .split(|b| *b == 0)
+            .any(|var| var == wanted.as_bytes())
+        {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(dir.join("cmdline")) else {
+            continue;
+        };
+        let argv0 = String::from_utf8_lossy(cmdline.split(|b| *b == 0).next().unwrap_or_default())
+            .into_owned();
+        let exe = argv0
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
+        if exe.ends_with(".exe") && !WINE_PROGRAMS.contains(&exe.as_str()) {
+            found.push(argv0);
+        }
+    }
+    found
+}
+
+fn reset_staging(staging: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(staging) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("clearing {}", staging.display())),
+    }
+    std::fs::create_dir_all(staging.join("config"))?;
+    // Wine maps Documents, Pictures, ... to the user's own folders, which it
+    // finds through this file.
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")));
+    if let Some(dirs) = config.map(|c| c.join("user-dirs.dirs"))
+        && dirs.is_file()
+    {
+        std::fs::copy(&dirs, staging.join("config/user-dirs.dirs"))?;
+    }
+    Ok(())
+}
+
+/// The menu entries Wine's menu builder made for the installer's Start Menu
+/// shortcuts, as launchers that run those shortcuts. Each launcher's icon is
+/// copied into the prefix, so it goes away with it.
+fn discover_launchers(staging: &Path, prefix: &Path) -> Result<Vec<Launcher>> {
+    let programs = staging.join("data/applications/wine/Programs");
+    let mut entries = Vec::new();
+    collect_desktop_files(&programs, &mut entries)?;
+    entries.sort();
+
+    let start_menus: Vec<PathBuf> = {
+        let mut dirs =
+            vec![prefix.join("drive_c/ProgramData/Microsoft/Windows/Start Menu/Programs")];
+        if let Ok(users) = std::fs::read_dir(prefix.join("drive_c/users")) {
+            for user in users.flatten() {
+                dirs.push(
+                    user.path()
+                        .join("AppData/Roaming/Microsoft/Windows/Start Menu/Programs"),
+                );
+            }
+        }
+        dirs
+    };
+    let mut launchers = Vec::new();
+    for entry in entries {
+        let Ok(relative) = entry.strip_prefix(&programs) else {
+            continue;
+        };
+        let fields = desktop_fields(&std::fs::read_to_string(&entry).unwrap_or_default());
+        let name = fields
+            .get("Name")
+            .cloned()
+            .unwrap_or_else(|| relative.with_extension("").display().to_string());
+        let lower = name.to_lowercase();
+        if NOT_LAUNCHERS.iter().any(|w| lower.contains(w)) {
+            continue;
+        }
+        // The shortcut the entry was made from, as a Windows path.
+        let lnk = relative.with_extension("lnk");
+        let Some(found) = start_menus
+            .iter()
+            .map(|d| d.join(&lnk))
+            .find(|p| p.is_file())
+        else {
+            continue;
+        };
+        let Ok(in_drive) = found.strip_prefix(prefix.join("drive_c")) else {
+            continue;
+        };
+        let exe = format!("C:\\{}", in_drive.display().to_string().replace('/', "\\"));
+        let icon = fields
+            .get("Icon")
+            .and_then(|name| copy_icon(staging, prefix, name));
+        launchers.push(Launcher {
+            name,
+            exe,
+            args: Vec::new(),
+            icon,
+            mime: Vec::new(),
+            categories: Vec::new(),
+        });
+    }
+    Ok(launchers)
+}
+
+fn collect_desktop_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_desktop_files(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "desktop") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// The `[Desktop Entry]` group's keys (untranslated values only).
+fn desktop_fields(text: &str) -> std::collections::HashMap<String, String> {
+    let mut fields = std::collections::HashMap::new();
+    let mut in_entry = false;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            in_entry = line.trim() == "[Desktop Entry]";
+        } else if in_entry && let Some((key, value)) = line.split_once('=') {
+            fields.insert(key.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    fields
+}
+
+/// Copy the largest PNG of a menu-builder icon into the prefix, and return its path.
+fn copy_icon(staging: &Path, prefix: &Path, name: &str) -> Option<String> {
+    if name.contains(['/', '\\']) || name.starts_with('.') {
+        return None;
+    }
+    let sizes = std::fs::read_dir(staging.join("data/icons/hicolor")).ok()?;
+    let (_, source) = sizes
+        .flatten()
+        .filter_map(|dir| {
+            let size: u32 = dir.file_name().to_str()?.split('x').next()?.parse().ok()?;
+            let png = dir.path().join("apps").join(format!("{name}.png"));
+            png.is_file().then_some((size, png))
+        })
+        .max_by_key(|(size, _)| *size)?;
+    let dest = prefix.join(".whistle-icons").join(format!("{name}.png"));
+    std::fs::create_dir_all(dest.parent()?).ok()?;
+    std::fs::copy(&source, &dest).ok()?;
+    Some(dest.display().to_string())
 }
 
 /// Stop the prefix's wineserver and delete the prefix and its menu entries.

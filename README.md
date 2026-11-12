@@ -39,14 +39,16 @@ registry tweaks. Whistle gives you one command for all of it.
 - **One name, every distro.** `whistle install firefox` becomes `pacman`, `apt`,
   `dnf` or `zypper` with that distro's package name, or Flatpak when the distro
   doesn't ship the app.
-- **Windows apps, one command.** Reviewed recipes set up a Wine prefix per app,
-  run the installer and add the app to your menu.
+- **Windows apps, one command.** A recipe sets up a Wine prefix per app, runs
+  the installer and adds the app to your menu, with its own icon.
 - **Nothing hosted, nothing hidden.** Whistle drives the package managers you
   already have. Installers come from the vendor's own site and must match a
   pinned SHA-256.
-- **About 1,000 apps** from Flathub and hand-maintained entries. Around 380 of
-  them install as your distro's own package, matched through the distros'
-  AppStream data.
+- **Everything, in one search.** About 17,700 apps: all of Flathub, the desktop
+  apps the distros ship themselves, and over 12,000 Windows apps from
+  [winget](https://github.com/microsoft/winget-pkgs). Most Linux apps come with
+  an icon and screenshots. Anything else your distro packages, like `htop` or
+  `ffmpeg`, is found and installed through your own package manager.
 
 ## Supported systems
 
@@ -59,6 +61,9 @@ registry tweaks. Whistle gives you one command for all of it.
 | openSUSE Tumbleweed    | zypper          | ✓ |
 | Any distro             | Flatpak (per-user), AppImage | |
 | Linux with Wine        | Windows apps through recipes | Notepad++ verified on Wine 10 |
+
+If an app needs Flatpak or Wine and it isn't installed, `whistle install`
+offers to install it with your package manager first.
 
 Distros based on these (Linux Mint, Pop!_OS, Manjaro, EndeavourOS and others)
 work through `ID_LIKE` in `/etc/os-release`.
@@ -107,15 +112,24 @@ install -Dm755 target/release/whistle ~/.local/bin/whistle
 
 | Command | What it does |
 | --- | --- |
-| `whistle search <text>` | Find apps by name, ID or description. |
-| `whistle info <app>` | Every way to install the app here, best first, and why the others don't apply. |
+| `whistle search <text>` | Find apps by name, ID or description, plus your distro's other packages. |
+| `whistle categories` | The app categories, and how many apps each has. |
+| `whistle info <app>` | The app's details and screenshots, and every way to install it here, best first. |
 | `whistle install <app>` | Install it with the best available method. |
 | `whistle remove <app>` | Uninstall it the same way it was installed. |
 | `whistle list` | Apps installed through Whistle. |
 | `whistle upgrade [<app>...]` | Update the catalog, then upgrade what Whistle installed. |
 | `whistle update [--from URL\|PATH]` | Download the latest catalog. |
 | `whistle doctor` | Show the distro, platform tags, CPU and the tools found. |
+| `whistle self-update` | Update Whistle itself to the latest release. |
 
+`search` takes `--native`, `--flatpak` or `--windows` to show only apps
+installed that way, and `--category <name>` (such as `Game` or `Graphics`).
+`search`, `info`, `list` and `categories` print JSON with `--json`.
+
+When a name matches several apps, `whistle` lists them and asks which one you
+mean. An app that installs on Linux wins over a Windows-only app of the same
+name.
 Useful flags for `install`:
 
 | Flag | Effect |
@@ -125,20 +139,42 @@ Useful flags for `install`:
 | `--via <method>` | Force a method: `native`, `apt`, `pacman`, `dnf`, `zypper`, `flatpak`, `appimage`, `wine`, ... |
 | `--allow-draft` | Allow recipes that nobody has reviewed yet. |
 
-If an app is only available as a Flatpak and Flatpak isn't installed, `install`
-offers to set it up first with your package manager.
-
 `upgrade` upgrades each app the way it was installed: one package-manager call
 per manager, `flatpak update` for Flatpaks, and a fresh run of the recipe when
 the catalog has a newer revision of it (the app keeps its settings). On Arch,
 only whole-system upgrades are supported, so Whistle leaves native packages to
 `sudo pacman -Syu`.
 
+### Tab completion
+
+Commands, flags and app names complete with Tab. Add one line to your shell's
+startup file:
+
+```sh
+source <(COMPLETE=bash whistle)              # ~/.bashrc
+source <(COMPLETE=zsh whistle)               # ~/.zshrc
+COMPLETE=fish whistle | source               # ~/.config/fish/config.fish
+```
+
+### Windows apps
+
+Windows apps come in two kinds:
+
+- **Reviewed recipes** from [whistle-recipes](https://github.com/thisisroot/whistle-recipes),
+  marked `verified` or `community`.
+- **Generated recipes** for the rest of winget, marked `untested`. Whistle asks
+  before using one, and after installing, starts the app once to check that it
+  runs. If it closes right away, Whistle says so; `whistle remove` takes it away
+  again.
+
+Before installing, Whistle checks the recipe's minimum Wine version and free
+disk space, and warns when the machine has less RAM than the app wants.
+
 ## How it works
 
 ```mermaid
 flowchart LR
-    A["whistle install gimp"] --> B["Catalog<br/>(index.json)"]
+    A["whistle install gimp"] --> B["Catalog<br/>(catalog.json)"]
     B --> C{"Best method<br/>for this machine"}
     C -->|1| D["Native package<br/>pacman · apt · dnf · zypper"]
     C -->|2| E["Flatpak"]
@@ -146,10 +182,11 @@ flowchart LR
     C -->|4| G["Wine recipe<br/>(Windows apps)"]
 ```
 
-1. **Catalog.** `whistle update` downloads `index.json`, which
-   [whistle-server](https://github.com/thisisroot/whistle-server) rebuilds and
-   signs every day. For each app it lists the package name on each distro, the
-   Flatpak ref, the winget ID and any recipes for running it on the other OS.
+1. **Catalog.** `whistle update` downloads the catalog (2.7 MB compressed),
+   which [whistle-server](https://github.com/thisisroot/whistle-server) rebuilds
+   and signs every day. For each app it lists the package name on each distro,
+   the Flatpak ref, the winget ID, any recipes for running it on the other OS,
+   and its icon and screenshots.
 2. **Resolve.** Whistle reads `/etc/os-release` and checks which tools are
    installed. It ranks every option in this order: native package, Flatpak,
    AppImage, winget, vendor installer, Wine recipe, Proton, WSL, VM. An option
@@ -158,7 +195,9 @@ flowchart LR
    distro it's based on.
 3. **Install.** Package managers are called directly. A Wine recipe gets its
    own prefix in `~/.local/share/whistle/prefixes/<recipe>` and a menu entry per
-   program. Afterwards, the prefix's copies of Wine's own DLLs are replaced with
+   program, taken from the installer's Start Menu shortcuts. Wine's own menu
+   builder only runs into a staging folder, so it leaves no stray menu entries
+   or file associations behind. Afterwards, the prefix's copies of Wine's own DLLs are replaced with
    links to the read-only originals, which keeps a prefix around 150 MB instead
    of 1.3 GB. When the system's Wine is upgraded, the links already point to the
    new DLLs.
@@ -179,7 +218,9 @@ flowchart LR
   overrides, registry, copy, environment, run installer). There is no "run this
   script" step. The client re-checks every path and registry key, so a bad
   catalog can't make a recipe write outside its prefix.
-- **Reviewed by default.** Draft recipes are only offered with `--allow-draft`.
+- **Honest about untested apps.** Generated recipes are marked `untested`,
+  checked after install, and never preferred over a reviewed recipe. Draft
+  recipes are only offered with `--allow-draft`.
 - **Asks first.** Nothing changes until you confirm, and `--dry-run` shows the
   exact commands.
 
@@ -191,6 +232,7 @@ flowchart LR
 | `WHISTLE_INDEX_PUBKEY` | The minisign public key that catalog is signed with, if it's not the official one. |
 | `WHISTLE_INDEX` | Use this index file instead of the downloaded one. |
 | `WHISTLE_ROOT` | Keep all of Whistle's files under this folder (handy for testing). |
+| `WHISTLE_NO_IMAGES` | Don't show icons in terminals that can display images. |
 
 Before the first `whistle update`, Whistle uses a small built-in catalog
 ([`catalog/dev-index.json`](catalog/dev-index.json)).
@@ -235,7 +277,10 @@ to this one, or the folder in `WHISTLE_RECIPES_DIR`.
 - [x] Prebuilt binaries and a one-line installer
 - [x] `whistle upgrade`, and Flatpak setup when it's missing
 - [x] Signed catalog
-- [ ] More verified Windows recipes
+- [x] All Flathub and distro apps, every distro package, 12,000 Windows apps from winget
+- [x] Icons and screenshots
+- [ ] Automatic testing of generated Windows recipes in a sandbox
+- [ ] Reporting whether an app works back to the catalog
 - [ ] Proton, WSL and VM runtimes
 - [ ] Desktop app
 

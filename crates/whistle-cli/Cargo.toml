@@ -14,6 +14,8 @@ path = "src/main.rs"
 whistle-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

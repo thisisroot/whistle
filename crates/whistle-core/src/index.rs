@@ -5,7 +5,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::paths::Paths;
 use crate::recipe::Runtime;
@@ -14,7 +15,7 @@ pub const FORMAT: u32 = 1;
 
 /// Where whistle-server publishes the index; `$WHISTLE_INDEX_URL` overrides it.
 pub const DEFAULT_URL: &str =
-    "https://github.com/thisisroot/whistle-server/releases/download/index/index.json";
+    "https://github.com/thisisroot/whistle-server/releases/download/index/catalog.json";
 
 /// Largest index `update` accepts.
 const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
@@ -45,14 +46,17 @@ pub struct App {
     pub categories: Vec<String>,
     #[serde(default)]
     pub icon_url: String,
+    /// Screenshot image URLs, best first.
+    #[serde(default)]
+    pub screenshots: Vec<String>,
     #[serde(default)]
     pub homepage: String,
     /// SPDX expression, or `LicenseRef-proprietary`.
     #[serde(default)]
     pub license: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "skip_unreadable")]
     pub sources: Vec<Source>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "skip_unreadable")]
     pub recipes: Vec<RecipeEntry>,
 }
 
@@ -145,6 +149,8 @@ pub struct RecipeEntry {
 pub enum RecipeStatus {
     Verified,
     Community,
+    /// Generated automatically and never tried: offered, with a warning.
+    Untested,
     Draft,
     Retired,
 }
@@ -154,6 +160,7 @@ impl fmt::Display for RecipeStatus {
         f.write_str(match self {
             Self::Verified => "verified",
             Self::Community => "community",
+            Self::Untested => "untested",
             Self::Draft => "draft",
             Self::Retired => "retired",
         })
@@ -202,7 +209,12 @@ impl Index {
     pub fn update(from: &str, paths: &Paths) -> Result<Self> {
         let downloaded = from.starts_with("https://");
         let text = if downloaded {
-            let text = crate::fetch::download_text(from, MAX_INDEX_BYTES)?;
+            // The compressed copy is a sixth of the size; older servers may not have it.
+            let text =
+                match crate::fetch::download_gzip_text(&format!("{from}.gz"), MAX_INDEX_BYTES)? {
+                    Some(text) => text,
+                    None => crate::fetch::download_text(from, MAX_INDEX_BYTES)?,
+                };
             let signature = crate::fetch::download_text(&format!("{from}.minisig"), 4096)
                 .context("downloading the catalog's signature")?;
             let keys = match std::env::var("WHISTLE_INDEX_PUBKEY") {
@@ -272,41 +284,116 @@ impl Index {
                 Some((rank, app))
             })
             .collect();
-        hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
+        // Equally good matches: apps that install on Linux before Windows-only twins.
+        hits.sort_by_cached_key(|(rank, app)| {
+            (*rank, !app.has_linux_source(), app.name.to_lowercase())
+        });
         hits.into_iter().map(|(_, app)| app).collect()
     }
 
     /// The app `query` names: an exact id, an exact name (any case), or the
     /// only app whose name or id contains it.
     pub fn find(&self, query: &str) -> Result<&App> {
-        if let Some(app) = self.apps.iter().find(|a| a.id == query) {
-            return Ok(app);
+        match self.lookup(query) {
+            Lookup::One(app) => Ok(app),
+            Lookup::None => bail!("no app matches {query:?}; try `whistle search`"),
+            Lookup::Many(apps) => bail!("{}", Lookup::describe(query, &apps)),
         }
-        if let Some(app) = self
+    }
+
+    /// What `query` refers to: an exact id; an exact name (any case), where
+    /// the one app that installs on Linux wins over Windows-only twins; or
+    /// the apps whose name or id contains it.
+    pub fn lookup(&self, query: &str) -> Lookup<'_> {
+        if let Some(app) = self.apps.iter().find(|a| a.id == query) {
+            return Lookup::One(app);
+        }
+        let named: Vec<&App> = self
             .apps
             .iter()
-            .find(|a| a.name.eq_ignore_ascii_case(query))
-        {
-            return Ok(app);
+            .filter(|a| a.name.eq_ignore_ascii_case(query))
+            .collect();
+        let linux: Vec<&App> = named
+            .iter()
+            .copied()
+            .filter(|a| a.has_linux_source())
+            .collect();
+        match (named.as_slice(), linux.as_slice()) {
+            ([app], _) | (_, [app]) => return Lookup::One(app),
+            ([], _) => {}
+            _ => {
+                return Lookup::Many(
+                    self.search(query)
+                        .into_iter()
+                        .filter(|a| named.iter().any(|n| std::ptr::eq(*n, *a)))
+                        .collect(),
+                );
+            }
         }
         let q = query.to_lowercase();
         let partial: Vec<&App> = self
-            .apps
-            .iter()
+            .search(query)
+            .into_iter()
             .filter(|a| a.name.to_lowercase().contains(&q) || a.id.to_lowercase().contains(&q))
             .collect();
         match partial.as_slice() {
-            [app] => Ok(app),
-            [] => bail!("no app matches {query:?}; try `whistle search`"),
-            many => {
-                let names: Vec<String> = many
-                    .iter()
-                    .map(|a| format!("{} ({})", a.name, a.id))
-                    .collect();
-                bail!("{query:?} matches several apps: {}", names.join(", "))
-            }
+            [app] => Lookup::One(app),
+            [] => Lookup::None,
+            _ => Lookup::Many(partial),
         }
     }
+}
+
+/// What a name refers to in the catalog.
+#[derive(Debug)]
+pub enum Lookup<'a> {
+    One(&'a App),
+    None,
+    /// Several apps, best matches first.
+    Many(Vec<&'a App>),
+}
+
+impl Lookup<'_> {
+    /// "\"blink\" matches several apps: ..." with the first few listed.
+    pub fn describe(query: &str, apps: &[&App]) -> String {
+        let mut names: Vec<String> = apps
+            .iter()
+            .take(8)
+            .map(|a| format!("{} ({})", a.name, a.id))
+            .collect();
+        if apps.len() > 8 {
+            names.push(format!("and {} more", apps.len() - 8));
+        }
+        format!("{query:?} matches several apps: {}", names.join(", "))
+    }
+}
+
+impl App {
+    /// Whether some source installs it on Linux, rather than only on Windows
+    /// or through a recipe.
+    pub fn has_linux_source(&self) -> bool {
+        self.sources.iter().any(|s| {
+            !matches!(
+                s.kind,
+                SourceKind::Winget | SourceKind::VendorInstaller | SourceKind::Wsl
+            )
+        })
+    }
+}
+
+/// Read a list, leaving out the entries this version can't read, such as a
+/// source kind or recipe status added to the server later, instead of
+/// rejecting the whole catalog.
+fn skip_unreadable<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let items = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect())
 }
 
 /// Fail unless `signature` (a minisign `.minisig` file) signs `data` with one of `keys`.
@@ -403,6 +490,33 @@ oD+we1r382ycHPx0yXJ0npPRw/bHuG4CBnct31JezJ2zoO6aa3Y5anDHa/eMRvkMLRr/6WBx8ZkJXWK6
     }
 
     #[test]
+    fn same_names_prefer_the_linux_app() {
+        let index = Index::parse(
+            r#"{"format": 1, "apps": [
+                {"id": "AG.Blink", "name": "Blink", "sources": [{"kind": "winget", "ref": "AG.Blink", "platforms": ["windows"]}]},
+                {"id": "com.icanblink.blink", "name": "Blink", "sources": [{"kind": "flatpak", "ref": "com.icanblink.blink", "platforms": ["linux"]}]},
+                {"id": "S.Blink", "name": "Blink", "sources": [{"kind": "winget", "ref": "S.Blink", "platforms": ["windows"]}]},
+                {"id": "org.example.BlinkTool", "name": "Blink Tool"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(index.find("blink").unwrap().id, "com.icanblink.blink");
+        assert_eq!(index.search("blink")[0].id, "com.icanblink.blink");
+        // Without a Linux app among them, it's the user's choice.
+        let windows_only = Index::parse(
+            r#"{"format": 1, "apps": [
+                {"id": "A.Cube", "name": "Cube"}, {"id": "B.Cube", "name": "Cube"}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(matches!(windows_only.lookup("cube"), Lookup::Many(apps) if apps.len() == 2));
+        assert!(
+            matches!(index.lookup("tool"), Lookup::One(app) if app.id == "org.example.BlinkTool")
+        );
+        assert!(matches!(index.lookup("nothing"), Lookup::None));
+    }
+
+    #[test]
     fn search_ranks_name_prefix_first() {
         let index = Index::builtin();
         let hits = index.search("fire");
@@ -442,6 +556,24 @@ oD+we1r382ycHPx0yXJ0npPRw/bHuG4CBnct31JezJ2zoO6aa3Y5anDHa/eMRvkMLRr/6WBx8ZkJXWK6
         );
         assert!(Index::update("http://example.org/index.json", &paths).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skips_entries_from_newer_servers() {
+        let index = Index::parse(
+            r#"{"format": 1, "apps": [
+                {"id": "org.example.A", "name": "A",
+                 "sources": [{"kind": "snap", "ref": "a", "platforms": ["linux"]},
+                             {"kind": "apt", "ref": "a", "platforms": ["linux"]}],
+                 "recipes": [{"id": "r", "runtime": "wine", "status": "experimental", "revision": 1, "spec": {}}],
+                 "rating": "gold"}
+            ]}"#,
+        )
+        .unwrap();
+        let app = &index.apps[0];
+        assert_eq!(app.sources.len(), 1);
+        assert_eq!(app.sources[0].kind, SourceKind::Apt);
+        assert!(app.recipes.is_empty());
     }
 
     #[test]
