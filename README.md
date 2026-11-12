@@ -129,7 +129,7 @@ install -Dm755 target/release/whistle ~/.local/bin/whistle
 
 | Command | What it does |
 | --- | --- |
-| `whistle search <text>` | Find apps by name, ID or description, plus your distro's other packages. |
+| `whistle search <text>` | The ten best matches you can install here, most popular first, plus your distro's other packages. `--all` lists every match. |
 | `whistle categories` | The app categories, and how many apps each has. |
 | `whistle info <app>` | The app's details and screenshots, and every way to install it here, best first. |
 | `whistle install <app>` | Install it with the best available method. |
@@ -144,9 +144,10 @@ install -Dm755 target/release/whistle ~/.local/bin/whistle
 installed that way, and `--category <name>` (such as `Game` or `Graphics`).
 `search`, `info`, `list` and `categories` print JSON with `--json`.
 
-When a name matches several apps, `whistle` lists them and asks which one you
-mean. An app that installs on Linux wins over a Windows-only app of the same
-name.
+Name an app the way search shows it, in quotes (`"Visual Studio Code"`), or as
+one word (`visual-studio-code`), or by its ID. When that matches several apps
+you can install here, `whistle` lists the ten best and asks which one you mean.
+An app that installs on Linux wins over a Windows-only app of the same name.
 Useful flags for `install`:
 
 | Flag | Effect |
@@ -164,8 +165,10 @@ only whole-system upgrades are supported, so Whistle leaves native packages to
 
 ### Tab completion
 
-Commands, flags and app names complete with Tab. Add one line to your shell's
-startup file:
+Commands, flags and app names complete with Tab: `whistle install vis` then
+Tab gives `visual-studio-code`, the most popular matches first. The installer
+sets this up for bash and fish. For zsh, or if you installed Whistle another
+way, add one line to your shell's startup file:
 
 ```sh
 source <(COMPLETE=bash whistle)              # ~/.bashrc

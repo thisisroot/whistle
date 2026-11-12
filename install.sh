@@ -8,6 +8,7 @@
 #
 #   WHISTLE_VERSION       a release tag such as v0.2.0 (default: the latest)
 #   WHISTLE_INSTALL_DIR   where to put the binary (default: ~/.local/bin)
+#   WHISTLE_NO_COMPLETION set to 1 to skip setting up tab completion
 set -eu
 
 REPO=thisisroot/whistle
@@ -67,6 +68,22 @@ chmod 755 "$dir/.whistle.new"
 mv -f "$dir/.whistle.new" "$dir/whistle"
 
 say "installed $("$dir/whistle" --version) to $dir/whistle"
+
+# Tab completion, in the folders bash (with bash-completion) and fish load
+# from by themselves. zsh has no such folder, so it gets a line to add.
+if [ "${WHISTLE_NO_COMPLETION:-}" != 1 ]; then
+    completions=${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions
+    if mkdir -p "$completions" && COMPLETE=bash "$dir/whistle" >"$completions/whistle"; then
+        say "tab completion is set up for new bash shells"
+    fi
+    if command -v fish >/dev/null 2>&1; then
+        completions=${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions
+        mkdir -p "$completions" && COMPLETE=fish "$dir/whistle" >"$completions/whistle.fish" || true
+    fi
+    case ${SHELL:-} in
+        */zsh) say "for tab completion in zsh, add this line to ~/.zshrc:  source <(COMPLETE=zsh whistle)" ;;
+    esac
+fi
 case ":$PATH:" in
     *":$dir:"*) say "run 'whistle update' to download the catalog" ;;
     *)

@@ -9,10 +9,11 @@ use whistle_core::paths::Paths;
 use whistle_core::state::State;
 
 /// Most candidates offered at once; more is noise.
-const LIMIT: usize = 200;
+const LIMIT: usize = 50;
 
-/// Apps in the catalog: their one-word names (which `whistle` accepts in any
-/// case) and their ids.
+/// Apps in the catalog, by the name to type (`visual-studio-code`), or by id
+/// once what's typed has a dot, like one. Popular apps first, for shells that keep
+/// the order.
 pub fn catalog_apps(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(current) = current.to_str() else {
         return Vec::new();
@@ -24,23 +25,30 @@ pub fn catalog_apps(current: &OsStr) -> Vec<CompletionCandidate> {
         return Vec::new();
     };
     let typed = current.to_lowercase();
-    let mut found: Vec<CompletionCandidate> = Vec::new();
-    let mut names = std::collections::HashSet::new();
+    let mut found: Vec<(u16, String, &str)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for app in &index.apps {
-        let name = app.name.to_lowercase();
-        if !name.contains(char::is_whitespace) && name.starts_with(&typed) {
-            // Apps sharing a name complete once; `whistle` asks which one.
-            if names.insert(name.clone()) {
-                found.push(CompletionCandidate::new(name).help(Some(app.summary.clone().into())));
-            }
-        } else if app.id.to_lowercase().starts_with(&typed) {
-            found.push(CompletionCandidate::new(&app.id).help(Some(app.name.clone().into())));
-        }
-        if found.len() >= LIMIT {
-            break;
+        let slug = app.slug();
+        let word = if slug.starts_with(&typed) {
+            slug
+        } else if typed.contains('.') && app.id.to_lowercase().starts_with(&typed) {
+            app.id.clone()
+        } else {
+            continue;
+        };
+        // Apps sharing a name complete once; `whistle` asks which one.
+        if seen.insert(word.clone()) {
+            found.push((app.popularity, word, &app.summary));
         }
     }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found
+        .into_iter()
+        .take(LIMIT)
+        .map(|(_, word, summary)| {
+            CompletionCandidate::new(word).help(Some(summary.to_owned().into()))
+        })
+        .collect()
 }
 
 /// Apps Whistle installed, for `remove` and `upgrade`.

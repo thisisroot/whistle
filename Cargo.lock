@@ -4258,7 +4258,7 @@ dependencies = [
 
 [[package]]
 name = "whistle-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4270,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "whistle-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -4287,7 +4287,7 @@ dependencies = [
 
 [[package]]
 name = "whistle-gui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "gio",

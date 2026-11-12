@@ -25,7 +25,8 @@ const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 /// them, for catalogs published by someone else.
 const TRUSTED_KEYS: &[&str] = &["RWRlRc/lhixaEkgN7SMrn4oxizAm3Qhl7RD6vr/wduv6wxpTJk4ifQrW"];
 
-/// Whether a word of `name` (split at spaces and punctuation) starts with `query`.
+/// Whether a word of `name` (split at spaces and punctuation) starts with
+/// `query`. Works for any text, summaries too.
 fn name_word_starts_with(name: &str, query: &str) -> bool {
     !query.is_empty()
         && (name.starts_with(query)
@@ -301,7 +302,9 @@ impl Index {
                     300
                 } else if name.contains(&q) || id_tail.contains(&q) {
                     250
-                } else if app.summary.to_lowercase().contains(&q) {
+                } else if name_word_starts_with(&app.summary.to_lowercase(), &q) {
+                    // A word of the summary, not the middle of one: "code"
+                    // shouldn't find every summary that says "Unicode".
                     0
                 } else {
                     return None;
@@ -330,17 +333,26 @@ impl Index {
         }
     }
 
-    /// What `query` refers to: an exact id; an exact name (any case), where
-    /// the one app that installs on Linux wins over Windows-only twins; or
-    /// the apps whose name or id contains it.
+    /// What `query` refers to: an exact id; an exact name (any case) or
+    /// slug, where the one app that installs on Linux wins over Windows-only
+    /// twins; or the apps whose name or id contains it, best first.
     pub fn lookup(&self, query: &str) -> Lookup<'_> {
+        self.lookup_where(query, |_| true)
+    }
+
+    /// Like `lookup`, among the apps `usable` accepts (the ones this computer
+    /// can install, say). An exact id is always found, so asking for an app
+    /// by id can explain why it can't be installed.
+    pub fn lookup_where(&self, query: &str, usable: impl Fn(&App) -> bool) -> Lookup<'_> {
         if let Some(app) = self.apps.iter().find(|a| a.id == query) {
             return Lookup::One(app);
         }
+        let slug = query.to_lowercase();
         let named: Vec<&App> = self
             .apps
             .iter()
-            .filter(|a| a.name.eq_ignore_ascii_case(query))
+            .filter(|a| a.name.eq_ignore_ascii_case(query) || a.slug() == slug)
+            .filter(|a| usable(a))
             .collect();
         let linux: Vec<&App> = named
             .iter()
@@ -363,7 +375,12 @@ impl Index {
         let partial: Vec<&App> = self
             .search(query)
             .into_iter()
-            .filter(|a| a.name.to_lowercase().contains(&q) || a.id.to_lowercase().contains(&q))
+            .filter(|a| {
+                a.name.to_lowercase().contains(&q)
+                    || a.slug().contains(&q)
+                    || a.id.to_lowercase().contains(&q)
+            })
+            .filter(|a| usable(a))
             .collect();
         match partial.as_slice() {
             [app] => Lookup::One(app),
@@ -398,6 +415,20 @@ impl Lookup<'_> {
 }
 
 impl App {
+    /// The name as one word to type: "Visual Studio Code" is
+    /// `visual-studio-code`, "Notepad++" is `notepad++`.
+    pub fn slug(&self) -> String {
+        let mut slug = String::new();
+        for c in self.name.to_lowercase().chars() {
+            if c.is_alphanumeric() || c == '+' {
+                slug.push(c);
+            } else if !slug.is_empty() && !slug.ends_with('-') {
+                slug.push('-');
+            }
+        }
+        slug.trim_end_matches('-').to_owned()
+    }
+
     /// Whether some source installs it on Linux, rather than only on Windows
     /// or through a recipe.
     pub fn has_linux_source(&self) -> bool {
@@ -572,6 +603,40 @@ oD+we1r382ycHPx0yXJ0npPRw/bHuG4CBnct31JezJ2zoO6aa3Y5anDHa/eMRvkMLRr/6WBx8ZkJXWK6
         assert!(name_word_starts_with("visual studio code", "code"));
         assert!(name_word_starts_with("code::blocks", "blocks"));
         assert!(!name_word_starts_with("barcode maker", "code"));
+    }
+
+    #[test]
+    fn slugs_and_lookups_among_usable_apps() {
+        let index = Index::parse(
+            r#"{"format": 1, "apps": [
+                {"id": "io.elementary.code", "name": "Code"},
+                {"id": "com.visualstudio.code", "name": "Visual Studio Code", "popularity": 900},
+                {"id": "org.codeblocks.Codeblocks", "name": "Code::Blocks", "popularity": 500},
+                {"id": "org.notepad-plus-plus.NotepadPlusPlus", "name": "Notepad++"}
+            ]}"#,
+        )
+        .unwrap();
+        let slugs: Vec<String> = index.apps.iter().map(App::slug).collect();
+        assert_eq!(
+            slugs,
+            ["code", "visual-studio-code", "code-blocks", "notepad++"]
+        );
+        assert!(
+            matches!(index.lookup("visual-studio-code"), Lookup::One(a) if a.id == "com.visualstudio.code")
+        );
+        assert!(matches!(index.lookup("Notepad++"), Lookup::One(_)));
+        // "Code" can't be installed here: offer the apps that can, best first.
+        let usable = |a: &App| a.id != "io.elementary.code";
+        let Lookup::Many(apps) = index.lookup_where("code", usable) else {
+            panic!("expected a choice");
+        };
+        let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["com.visualstudio.code", "org.codeblocks.Codeblocks"]);
+        // An exact id is always found, so install can say why it won't work.
+        assert!(matches!(
+            index.lookup_where("io.elementary.code", usable),
+            Lookup::One(_)
+        ));
     }
 
     #[test]

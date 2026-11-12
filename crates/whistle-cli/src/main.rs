@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 mod complete;
 mod image;
+mod ui;
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -41,6 +42,9 @@ enum Command {
         query: Vec<String>,
         #[command(flatten)]
         filter: Filter,
+        /// Show every match, not just the best ten.
+        #[arg(short, long)]
+        all: bool,
     },
     /// List the app categories and how many apps each has.
     Categories,
@@ -162,8 +166,8 @@ fn run(cli: Cli) -> Result<()> {
     let load = || Index::load(cli.index.as_deref(), &paths);
 
     match cli.command {
-        Command::Search { query, filter } => {
-            search(&load()?.0, &host, &query.join(" "), &filter, cli.json)
+        Command::Search { query, filter, all } => {
+            search(&load()?.0, &host, &query.join(" "), &filter, all, cli.json)
         }
         Command::Categories => categories(&load()?.0, cli.json),
         Command::Info { app, allow_draft } => {
@@ -172,7 +176,7 @@ fn run(cli: Cli) -> Result<()> {
                 via: None,
                 allow_draft,
             };
-            match choose(index.lookup(&app), &app, false)? {
+            match find(&index, &host, &app, false)? {
                 Some(found) => info(found, &host, &prefs, cli.json),
                 None => {
                     // Not an app in the catalog, but maybe one of the distro's packages.
@@ -199,7 +203,7 @@ fn run(cli: Cli) -> Result<()> {
             let (index, _) = load()?;
             // Anything the catalog doesn't know may still be a distro package.
             let fallback;
-            let app = match choose(index.lookup(&app), &app, yes)? {
+            let app = match find(&index, &host, &app, yes)? {
                 Some(found) => found,
                 None => {
                     fallback = install::distro_package(&app, &host)
@@ -257,9 +261,16 @@ fn run(cli: Cli) -> Result<()> {
             if state.installed.is_empty() {
                 println!("Nothing installed with Whistle yet.");
             }
-            for i in &state.installed {
-                println!("{:<24} {:<40} {}", i.app_name, i.app_id, i.how.describe());
-            }
+            let rows: Vec<ui::Row> = state
+                .installed
+                .iter()
+                .map(|i| ui::Row {
+                    name: i.app_name.clone(),
+                    tag: i.how.describe(),
+                    text: i.app_id.clone(),
+                })
+                .collect();
+            ui::Term::detect().rows(&rows, false);
             Ok(())
         }
         Command::Upgrade { apps, dry_run, yes } => {
@@ -353,11 +364,50 @@ fn runner(dry_run: bool) -> Box<dyn Runner> {
     }
 }
 
-/// How many of the distro's packages `search` lists.
-const MAX_PACKAGES: usize = 20;
+/// How many apps, and distro packages, `search` lists without `--all`.
+const SHOWN: usize = 10;
+const SHOWN_PACKAGES: usize = 5;
 
-fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) -> Result<()> {
+/// How `app` would be installed here, as a short tag ("apt", "Flatpak",
+/// "Windows"), and the runtime Whistle has to set up first, if any. `None`
+/// when nothing can install it.
+fn how(app: &App, host: &Host) -> Option<(String, Option<&'static str>)> {
     let prefs = Prefs::default();
+    let cands = resolve(app, host, &prefs);
+    let label = |method: &str| match method {
+        "flatpak" => "Flatpak".to_owned(),
+        "appimage" => "AppImage".to_owned(),
+        "wine" | "proton" => "Windows".to_owned(),
+        other => other.to_owned(),
+    };
+    if let Some(chosen) = best(&cands) {
+        return Some((label(chosen.method()), None));
+    }
+    let setup = install::runtime_setup(app, host, &prefs)?;
+    let method = cands.first().map_or("", |c| c.method());
+    Some((format!("{}*", label(method)), Some(setup.name)))
+}
+
+/// `query` as the user would type it again in a shell.
+fn shell_word(query: &str) -> String {
+    if query
+        .chars()
+        .all(|c| c.is_alphanumeric() || "-_.+".contains(c))
+    {
+        query.to_owned()
+    } else {
+        format!("'{}'", query.replace('\'', r"'\''"))
+    }
+}
+
+fn search(
+    index: &Index,
+    host: &Host,
+    query: &str,
+    filter: &Filter,
+    all: bool,
+    json: bool,
+) -> Result<()> {
     let category = filter.category.as_deref();
     let mut rows = Vec::new();
     for app in index.search(query) {
@@ -369,16 +419,13 @@ fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) 
         {
             continue;
         }
-        let cands = resolve(app, host, &prefs);
-        let chosen = best(&cands);
-        let setup = chosen
-            .is_none()
-            .then(|| install::runtime_setup(app, host, &prefs))
-            .flatten();
-        let method = chosen.map(|c| c.method().to_owned());
+        // Apps nothing can install on this computer aren't worth showing.
+        let Some((tag, setup)) = how(app, host) else {
+            continue;
+        };
         let keep = match (filter.native, filter.flatpak, filter.windows) {
             (true, ..) => {
-                chosen.is_some_and(|c| matches!(&c.target, Target::Source(s) if s.kind.is_native()))
+                setup.is_none() && !matches!(tag.as_str(), "Flatpak" | "AppImage" | "Windows")
             }
             (_, true, _) => app
                 .sources
@@ -387,9 +434,8 @@ fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) 
             (.., true) => !app.recipes.is_empty() && !app.has_linux_source(),
             _ => true,
         };
-        // Apps nothing can install on this computer aren't worth showing.
-        if keep && (method.is_some() || setup.is_some()) {
-            rows.push((app, method, setup));
+        if keep {
+            rows.push((app, tag, setup));
         }
     }
     // The distro's own packages, when looking for something by name.
@@ -402,15 +448,16 @@ fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) 
     if json {
         let apps: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(app, method, setup)| {
+            .map(|(app, tag, setup)| {
                 json!({
                     "id": app.id,
                     "name": app.name,
+                    "slug": app.slug(),
                     "summary": app.summary,
                     "categories": app.categories,
                     "icon_url": app.icon_url,
-                    "method": method,
-                    "needs_setup": setup.as_ref().map(|s| s.name),
+                    "method": tag.trim_end_matches('*'),
+                    "needs_setup": setup,
                 })
             })
             .collect();
@@ -426,44 +473,74 @@ fn search(index: &Index, host: &Host, query: &str, filter: &Filter, json: bool) 
         return Ok(());
     }
 
-    if rows.is_empty() && packages.as_ref().is_none_or(|(_, found)| found.is_empty()) {
-        println!("Nothing matches.");
+    let term = ui::Term::detect();
+    let found_packages = packages.as_ref().map_or(0, |(_, found)| found.len());
+    if rows.is_empty() && found_packages == 0 {
+        println!("Nothing you can install here matches {query:?}.");
+        return Ok(());
     }
-    let mut needs = std::collections::BTreeSet::new();
-    for (app, method, setup) in &rows {
-        let how = match (method, setup) {
-            (Some(method), _) => method.clone(),
-            (None, Some(setup)) => {
-                needs.insert(setup.name);
-                format!("{}*", setup.name.to_lowercase())
-            }
-            (None, None) => unreachable!("left out above"),
-        };
-        println!(
-            "{:<20} {:<40} {:<14} {}",
-            fit(&app.name, 20),
-            fit(&app.id, 40),
-            format!("[{how}]"),
-            app.summary
-        );
-    }
-    if !needs.is_empty() {
-        let names: Vec<&str> = needs.into_iter().collect();
-        println!(
-            "\n* Needs {}, which isn't installed yet. `whistle install` can set it up for you.",
-            names.join(" or ")
-        );
-    }
-    if let Some((kind, found)) = packages
+    let shown = if all {
+        rows.len()
+    } else {
+        rows.len().min(SHOWN)
+    };
+    let list: Vec<ui::Row> = rows[..shown]
+        .iter()
+        .map(|(app, tag, _)| ui::Row {
+            name: app.name.clone(),
+            tag: tag.clone(),
+            text: app.summary.clone(),
+        })
+        .collect();
+    term.rows(&list, false);
+
+    if let Some((kind, found)) = &packages
         && !found.is_empty()
     {
-        println!("\nMore packages from {kind}:");
-        for package in found.iter().take(MAX_PACKAGES) {
-            println!("{:<30} {}", fit(&package.name, 30), package.summary);
+        let shown = if all {
+            found.len()
+        } else {
+            found.len().min(SHOWN_PACKAGES)
+        };
+        println!("\n{}", term.bold(&format!("Other {kind} packages")));
+        let list: Vec<ui::Row> = found[..shown]
+            .iter()
+            .map(|p| ui::Row {
+                name: p.name.clone(),
+                tag: String::new(),
+                text: p.summary.clone(),
+            })
+            .collect();
+        term.rows(&list, false);
+    }
+
+    let mut notes = Vec::new();
+    let hidden = rows.len() - shown + found_packages.saturating_sub(SHOWN_PACKAGES);
+    if !all && hidden > 0 {
+        let mut again = vec!["whistle search".to_owned()];
+        if !query.is_empty() {
+            again.push(shell_word(query));
         }
-        if found.len() > MAX_PACKAGES {
-            println!("... and {} more", found.len() - MAX_PACKAGES);
+        if let Some(category) = category {
+            again.push(format!("--category {}", shell_word(category)));
         }
+        again.push("--all".to_owned());
+        notes.push(format!("{hidden} more: {}", again.join(" ")));
+    }
+    let needs: std::collections::BTreeSet<&str> = rows[..shown]
+        .iter()
+        .filter_map(|(_, _, setup)| *setup)
+        .collect();
+    if !needs.is_empty() {
+        let needs: Vec<&str> = needs.into_iter().collect();
+        notes.push(format!("* Whistle sets up {} first.", needs.join(" or ")));
+    }
+    if let Some((app, _, _)) = rows.first() {
+        notes.push(format!("Install one: whistle install {}", app.slug()));
+    }
+    println!();
+    for note in notes {
+        println!("{}", term.dim(&note));
     }
     Ok(())
 }
@@ -515,16 +592,6 @@ fn search_packages(
     let mut found = packages::search(kind, query);
     found.retain(|p| !known.contains(p.name.as_str()));
     Some((kind, found))
-}
-
-/// Shorten `text` to `width` characters, marking the cut with an ellipsis.
-fn fit(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    let mut short: String = text.chars().take(width - 1).collect();
-    short.push('…');
-    short
 }
 
 fn info(app: &App, host: &Host, prefs: &Prefs, json: bool) -> Result<()> {
@@ -735,11 +802,26 @@ fn install_app(
 }
 
 /// How many apps `choose` offers.
-const MAX_CHOICES: usize = 15;
+const MAX_CHOICES: usize = 10;
+
+/// The app `query` names. Apps this computer can't install are passed over,
+/// unless named by their exact id (or nothing else matches exactly), so that
+/// install can say why.
+fn find<'a>(index: &'a Index, host: &Host, query: &str, yes: bool) -> Result<Option<&'a App>> {
+    let prefs = Prefs::default();
+    let lookup = match index.lookup_where(query, |a| !resolve(a, host, &prefs).is_empty()) {
+        Lookup::None => match index.lookup(query) {
+            Lookup::One(app) => Lookup::One(app),
+            _ => Lookup::None,
+        },
+        found => found,
+    };
+    choose(lookup, query, yes, host)
+}
 
 /// The app a lookup settled on. When several match, ask which one, unless
 /// there's no one to ask (`-y`, or not a terminal).
-fn choose<'a>(lookup: Lookup<'a>, query: &str, yes: bool) -> Result<Option<&'a App>> {
+fn choose<'a>(lookup: Lookup<'a>, query: &str, yes: bool, host: &Host) -> Result<Option<&'a App>> {
     let apps = match lookup {
         Lookup::One(app) => return Ok(Some(app)),
         Lookup::None => return Ok(None),
@@ -748,26 +830,32 @@ fn choose<'a>(lookup: Lookup<'a>, query: &str, yes: bool) -> Result<Option<&'a A
     if yes || !std::io::stdin().is_terminal() {
         bail!("{}; name one by its id", Lookup::describe(query, &apps));
     }
-    println!("Several apps match {query:?}:");
-    for (n, app) in apps.iter().take(MAX_CHOICES).enumerate() {
-        println!(
-            "  {:>2}. {:<24} {:<40} {}",
-            n + 1,
-            fit(&app.name, 24),
-            fit(&app.id, 40),
-            fit(&app.summary, 50)
-        );
-    }
+    let term = ui::Term::detect();
+    let offered = &apps[..apps.len().min(MAX_CHOICES)];
+    println!(
+        "{}",
+        term.bold(&format!("Which one do you mean by {query:?}?"))
+    );
+    let rows: Vec<ui::Row> = offered
+        .iter()
+        .map(|app| ui::Row {
+            name: app.name.clone(),
+            tag: how(app, host).map(|(tag, _)| tag).unwrap_or_default(),
+            text: app.summary.clone(),
+        })
+        .collect();
+    term.rows(&rows, true);
     if apps.len() > MAX_CHOICES {
         println!(
-            "  ... and {} more; `whistle search {query}` lists them all",
-            apps.len() - MAX_CHOICES
+            "{}",
+            term.dim(&format!(
+                "      {} more: whistle search {} --all",
+                apps.len() - MAX_CHOICES,
+                shell_word(query)
+            ))
         );
     }
-    print!(
-        "Which one? [1-{}, Enter to cancel] ",
-        apps.len().min(MAX_CHOICES)
-    );
+    print!("Number [1-{}, Enter to cancel]: ", offered.len());
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
@@ -776,7 +864,7 @@ fn choose<'a>(lookup: Lookup<'a>, query: &str, yes: bool) -> Result<Option<&'a A
         bail!("cancelled");
     }
     match answer.parse::<usize>() {
-        Ok(n) if (1..=apps.len().min(MAX_CHOICES)).contains(&n) => Ok(Some(apps[n - 1])),
+        Ok(n) if (1..=offered.len()).contains(&n) => Ok(Some(offered[n - 1])),
         _ => bail!("{answer:?} isn't one of the numbers"),
     }
 }
